@@ -13,6 +13,8 @@ dependencies = [
     "numpy>=1.24",                 # pixel arrays (frame gate, synthetic video); opencv needs it too
     "PyYAML>=6.0",                 # scenarios, zones, rule thresholds
     "rich>=13.0",                  # CLI console output
+    "google-genai>=2.25",          # official Gemini SDK (optional real FrameDescriber)
+    "python-dotenv>=1.0",          # load GEMINI_* from a local, gitignored .env
 ]
 
 [project.optional-dependencies]

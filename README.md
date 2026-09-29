@@ -3,7 +3,7 @@
 Prototype for the FlytBase AI Engineer assignment: a docked-drone security analyst that turns video and
 telemetry into events, deterministic alerts, searchable history and grounded Q&A.
 
-> **Status: M5A (real-video pipeline, provider-neutral).** Scripted scenarios run end to end through alerts; real video runs through sampling, a frame-change gate and cassette replay. **No real vision model is integrated yet** (M5B); Q&A and summaries come later.
+> **Status: M5B (real-video pipeline with optional Gemini).** Scripted scenarios run end to end through alerts; real video runs through sampling, a frame-change gate and cassette replay. **Gemini is available as an optional real vision model (M5B)**; Q&A and summaries come later.
 
 Design in one line: `FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING`.
 
@@ -19,7 +19,7 @@ python -m venv .venv
 pip install -e ".[dev]"       # add ".[agent]" for the LangChain Q&A layer (M6)
 pytest
 ```
-API keys, if any are ever used, are read from environment variables only (see `.env.example`). Never commit `.env`.
+API keys are read from environment variables only, or from a local gitignored `.env` (see `.env.example`). Never commit `.env`.
 
 ## Running the demo
 No API key and no network are needed. Databases and demo files are written under `output/` (gitignored).
@@ -52,6 +52,16 @@ not produced by a model. The telemetry is SIMULATED: a start time and zone you s
 Frames the gate skips are, by default, *carried forward*: the observation stored for them repeats the last accepted one and is labelled
 `source = "<provider>+carried"`. That is temporal propagation of an earlier model answer, NOT a new model inference (`--skipped drop`
 stores nothing for skipped frames instead). After ingestion the store, events, entities and rules run unchanged. See docs/architecture.md ("Real video ingestion") for the sampling, gate and cassette design.
+
+**Real vision model (M5B, optional; needs `GEMINI_API_KEY`, and optionally `GEMINI_MODEL`, in `.env` or the environment):**
+```
+python -m drone_agent describe-frame VIDEO --time 4 --provider gemini            # ONE frame, ONE call, stores nothing
+python -m drone_agent ingest-video VIDEO --db output/g.db --provider gemini --cassette-mode record --cassette output/g.cassette.json
+python -m drone_agent ingest-video VIDEO --db output/g2.db --provider cassette --cassette output/g.cassette.json   # replay: zero API calls
+```
+Gemini only sees frames the gate accepts; skipped samples are carried forward (still not a new inference). The model reports no confidence, so objects carry an
+UNCALIBRATED placeholder of 0.5. `--model` overrides `GEMINI_MODEL`; there is no fallback model. Telemetry and zones remain simulated. Cassettes and videos are never committed.
+See docs/architecture.md ("Gemini provider").
 
 `ingest` twice into one database is rejected and changes nothing (use a new `--db`); `build-events` and `analyze` replace their derived data (idempotent).
 

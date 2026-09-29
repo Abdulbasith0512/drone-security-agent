@@ -13,6 +13,7 @@ from drone_agent.video.sampling import (
     SamplingConfig,
     SamplingReport,
     plan_samples,
+    read_frame_at,
     sample_frames,
 )
 from drone_agent.video.source import VideoError, VideoMetadata, VideoSource
@@ -41,6 +42,7 @@ __all__ = [
     "VideoTimeline",
     "load_timeline",
     "plan_samples",
+    "read_frame_at",
     "run_video_ingest",
     "sample_frames",
     "single_zone_timeline",

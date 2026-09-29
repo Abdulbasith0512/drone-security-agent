@@ -395,7 +395,7 @@ SIMULATED timeline (start time + patrol zones) ─► simulated telemetry ─►
 
 ## What is real and what is simulated
 **Real:** the video file, its decoding, the sampled frames and their pixels, the frame-change gate scores, the frame
-identity hashes, and (once M5B exists) the vision model's descriptions. **Simulated:** the drone telemetry (a demo video
+identity hashes, and the vision model's descriptions when `--provider gemini` is used. **Simulated:** the drone telemetry (a demo video
 carries none), the zone each frame is assigned to, and the wall-clock time of each frame. **Canned:** the only cassette
 in the repository comes from `make-demo-video` and its descriptions are written by that tool, not by a vision model; the
 cassette says so in its `provider` field and the CLI prints it.
@@ -512,7 +512,31 @@ end), gate accepted and skipped, provider calls and cassette replays, observatio
 stale associations. It does NOT build events or alerts; run `build-events` and `analyze` next. The whole pipeline runs before the
 database is opened, so any error (bad video, cassette miss, malformed response, short timeline) leaves no database behind.
 
-## What the real VLM provider (M5B) must implement
+## Gemini provider (M5B, `vision/gemini.py`)
+Gemini is an OPTIONAL real `FrameDescriber` (official `google-genai` SDK). Nothing else changes: it returns the same validated
+`ProviderOutput`, so sampling, the gate, the store, events, entities and rules are untouched.
+* **Model:** `--model`, else `GEMINI_MODEL`, else a code default; the selected model is shown in every run summary and is part of the
+  provider name (`gemini:<model>`, stored in `Observation.source` and the cassette). A failing model is never replaced by another one.
+* **Image preparation:** the OpenCV BGR frame is downscaled only if its longest side exceeds `--max-dimension` (default 1024, aspect ratio kept, never
+  upscaled) and JPEG-encoded in memory (`--jpeg-quality`, default 85). No temp files. `cv2.imencode` expects BGR, so there is no manual BGR->RGB step (doing it would
+  swap red and blue in the file); a test checks that blue stays blue.
+* **Prompt and structured output:** `PROVIDER_INSTRUCTIONS` as the system instruction plus a one-line exception (no confidence). Gemini's native JSON mode receives
+  `provider_output_schema()` minus the `confidence` field. The reply text is then validated by our own `parse_provider_output()` (strict Pydantic); there is no regex
+  JSON extraction and no repair. The model is never asked about suspicion, intent, identity, "same person/vehicle" or severity.
+* **Confidence:** Gemini gives no calibrated probability, so none is requested and the cassette records `null`. Observations get the placeholder
+  `0.5` (`--default-confidence` overrides), an UNCALIBRATED constant, not a model probability; nothing downstream uses it for decisions.
+* **Failure policy:** missing key or bad settings, auth (401/403, "API key not valid"), model not found (404) and other rejected requests fail immediately, no retry.
+  Rate limit (429), timeouts, network errors and 5xx get at most 2 retries (2 s, 5 s). Malformed or empty output gets exactly one retry, then
+  `GeminiOutputError`. Error text is scrubbed of the key and the raw SDK exception is not chained. Retries are counted in the run summary.
+* **API key:** `GEMINI_API_KEY` from the process environment, or a root `.env` read with python-dotenv (never overriding the real environment). It is never printed
+  (only "GEMINI_API_KEY configured: yes"), logged, stored in SQLite or cassettes, or shown in exceptions.
+* **Commands:** `describe-frame VIDEO --time S --provider gemini [--model M]` decodes ONE frame, calls Gemini once and prints the validated result; it stores nothing and runs no rules.
+  `ingest-video --provider gemini --cassette-mode record --cassette FILE` calls Gemini only for gate-accepted frames, records each validated response, carries forward
+  for skipped samples and flushes the cassette even if a later call fails (a re-run resumes and pays only for missing frames; a cassette recorded by another model is rejected).
+  `--cassette-mode live` calls Gemini without a cassette. `--provider cassette` replays with ZERO API calls (and applies the same placeholder for Gemini recordings).
+* **Real versus simulated:** with Gemini the descriptions of the frames are real model output; the telemetry, zone and wall-clock time are still SIMULATED.
+
+## What a real VLM provider must implement (the contract Gemini follows)
 One class implementing `FrameDescriber`: `name: str` and `describe(frame: FrameInput) -> ProviderOutput`.
 * **Input:** `frame.image` (BGR uint8 ndarray, typically 320-1920 px wide; downscale and JPEG/PNG-encode it for the API), plus
   `frame.frame_key`, `frame.offset_seconds` for logging. The prompt is `PROVIDER_INSTRUCTIONS`; the JSON Schema is `provider_output_schema()`.

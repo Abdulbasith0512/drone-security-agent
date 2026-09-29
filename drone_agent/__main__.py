@@ -36,6 +36,7 @@ from drone_agent.video import (
     VideoIngestConfig,
     VideoSource,
     load_timeline,
+    read_frame_at,
     run_video_ingest,
     single_zone_timeline,
 )
@@ -45,7 +46,15 @@ from drone_agent.vision import (
     CassetteError,
     CassetteMode,
     DescriberProvider,
+    FrameInput,
     ProviderOutputError,
+)
+from drone_agent.vision.cassette import CassetteVideo
+from drone_agent.vision.gemini import (
+    PLACEHOLDER_CONFIDENCE,
+    GeminiConfig,
+    GeminiDescriber,
+    GeminiError,
 )
 
 
@@ -537,8 +546,73 @@ def _parse_size(value: str) -> tuple[int, int]:
         raise argparse.ArgumentTypeError(f"'{value}' must look like 64x36") from exc
 
 
+DEFAULT_VIDEO_START = "2026-09-29T23:40:00+05:30"
+
+
+def _gemini_config(args: argparse.Namespace, console: Console) -> GeminiConfig:
+    """Build the Gemini config (key from the environment/.env only) and report only whether it
+    exists, never any part of it."""
+    config = GeminiConfig.from_env(
+        args.model, max_dimension=args.max_dimension, jpeg_quality=args.jpeg_quality
+    )
+    console.print("GEMINI_API_KEY configured: yes")
+    return config
+
+
+def _build_video_provider(
+    args: argparse.Namespace, meta, console: Console
+) -> tuple[DescriberProvider, CassetteDescriber | None, GeminiDescriber | None]:
+    """Returns (provider, cassette describer or None, gemini describer or None)."""
+    mode = CassetteMode(args.cassette_mode)
+    default_confidence = args.default_confidence
+    if args.provider == "cassette":
+        if mode is not CassetteMode.REPLAY:
+            raise CassetteError("--provider cassette only replays; use --provider gemini to record")
+        if not args.cassette:
+            raise CassetteError("--provider cassette needs --cassette FILE")
+        cassette = Cassette.load(args.cassette)
+        describer = CassetteDescriber(cassette, CassetteMode.REPLAY)
+        describer.check_video(meta.sha256)
+        if default_confidence is None and cassette.data.provider.startswith("gemini"):
+            default_confidence = PLACEHOLDER_CONFIDENCE
+        return DescriberProvider(describer, default_confidence), describer, None
+
+    if mode is CassetteMode.REPLAY:
+        raise CassetteError("--provider gemini needs --cassette-mode record or live")
+    gemini = GeminiDescriber(_gemini_config(args, console))
+    if default_confidence is None:
+        default_confidence = PLACEHOLDER_CONFIDENCE
+    if mode is CassetteMode.LIVE:
+        return DescriberProvider(gemini, default_confidence), None, gemini
+    if not args.cassette:
+        raise CassetteError("--cassette-mode record needs --cassette FILE to write")
+    if Path(args.cassette).exists():
+        cassette = Cassette.load(args.cassette)
+        if cassette.data.provider != gemini.name:
+            raise CassetteError(
+                f"cassette was recorded by '{cassette.data.provider}', not '{gemini.name}'; "
+                "use a new cassette path or the same --model"
+            )
+    else:
+        cassette = Cassette.new(
+            gemini.name,
+            CassetteVideo(
+                name=meta.source_name,
+                sha256=meta.sha256,
+                fps=meta.fps,
+                frame_count=meta.frame_count,
+                width=meta.width,
+                height=meta.height,
+            ),
+        )
+    describer = CassetteDescriber(cassette, CassetteMode.RECORD, inner=gemini, path=args.cassette)
+    describer.check_video(meta.sha256)
+    return DescriberProvider(describer, default_confidence), describer, gemini
+
+
 def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
     describer: CassetteDescriber | None = None
+    gemini: GeminiDescriber | None = None
     try:
         source = VideoSource(args.video)
         meta = source.metadata
@@ -546,14 +620,7 @@ def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
             timeline = load_timeline(args.timeline)
         else:
             timeline = single_zone_timeline(args.start, Zone(args.zone), meta.duration_seconds)
-        if args.provider == "cassette":
-            if not args.cassette:
-                raise CassetteError("--provider cassette needs --cassette FILE")
-            describer = CassetteDescriber(Cassette.load(args.cassette), CassetteMode.REPLAY)
-            describer.check_video(meta.sha256)
-            provider = DescriberProvider(describer)
-        else:  # argparse restricts the choices; a real VLM provider arrives in M5B
-            raise CassetteError(f"unknown provider {args.provider}")
+        provider, describer, gemini = _build_video_provider(args, meta, console)
         width, height = args.gate_resize
         config = VideoIngestConfig(
             sampling=SamplingConfig(every_seconds=args.sample_every),
@@ -565,9 +632,27 @@ def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
             ),
             skipped=SkippedPolicy(args.skipped),
         )
-        result = run_video_ingest(source, provider, timeline, config)
-    except (VideoError, TimelineError, CassetteError, ProviderOutputError, ValueError) as exc:
+        try:
+            result = run_video_ingest(source, provider, timeline, config)
+        finally:
+            # Keep every response already paid for, even if a later frame fails.
+            if describer is not None and describer.recorded:
+                describer.flush()
+    except (
+        VideoError,
+        TimelineError,
+        CassetteError,
+        ProviderOutputError,
+        GeminiError,
+        ValueError,
+    ) as exc:
         _error(console, str(exc))
+        if describer is not None and describer.recorded:
+            console.print(
+                _cell(
+                    f"cassette saved with {describer.recorded} recorded frame(s): {args.cassette}"
+                )
+            )
         return 2
 
     try:
@@ -610,7 +695,27 @@ def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
         _cell(f"{result.gate_skipped} (policy: {args.skipped}; carried {result.carried})"),
     )
     replays = f", cassette replays {describer.replayed}" if describer else ""
+    table.add_row("Provider", _cell(provider.name))
     table.add_row("Provider calls", _cell(f"{result.provider_calls}{replays}"))
+    if gemini is not None:
+        table.add_row(
+            "Gemini API requests",
+            _cell(
+                f"{gemini.api_calls} (retries {gemini.retries}, "
+                f"total latency {gemini.total_latency_s:.1f}s)"
+            ),
+        )
+        if describer is not None:
+            table.add_row(
+                "Cassette",
+                _cell(
+                    f"recorded {describer.recorded}, replayed {describer.replayed}: {args.cassette}"
+                ),
+            )
+        table.add_row(
+            "Confidence",
+            _cell(f"UNCALIBRATED placeholder {provider.default_confidence} (Gemini reports none)"),
+        )
     if describer and describer.content_mismatches:
         table.add_row(
             "Cassette content mismatches",
@@ -643,6 +748,49 @@ def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
                 _cell(c.action),
             )
         console.print(detail)
+    return 0
+
+
+def describe_frame_command(args: argparse.Namespace, console: Console) -> int:
+    """Smoke test: one frame -> Gemini -> validated ProviderOutput. Persists nothing."""
+    try:
+        source = VideoSource(args.video)
+        sampled = read_frame_at(source, args.time)
+        gemini = GeminiDescriber(_gemini_config(args, console))
+        frame = FrameInput(
+            frame_id=sampled.frame_id,
+            timestamp=datetime.fromisoformat(DEFAULT_VIDEO_START),
+            source_name=sampled.source,
+            offset_seconds=sampled.offset_seconds,
+            image=sampled.image,
+        )
+        output = gemini.describe(frame)
+    except (VideoError, GeminiError, ProviderOutputError, ValueError) as exc:
+        _error(console, str(exc))
+        return 2
+    width, height = gemini.last_image_size or (0, 0)
+    table = Table(title="Single-frame Gemini smoke test (nothing stored)", show_header=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Model", _cell(gemini.config.model))
+    table.add_row(
+        "Frame",
+        _cell(f"index {sampled.frame_index} at {sampled.offset_seconds:.2f}s of {args.video}"),
+    )
+    table.add_row("Original size", _cell(f"{sampled.width}x{sampled.height}"))
+    table.add_row("Encoded image", _cell(f"{width}x{height} JPEG, {gemini.last_jpeg_bytes} bytes"))
+    table.add_row("API requests", _cell(f"{gemini.api_calls} (retries {gemini.retries})"))
+    table.add_row("Latency", _cell(f"{gemini.total_latency_s:.2f}s"))
+    table.add_row("Validation", _cell("ProviderOutput valid (strict Pydantic schema)"))
+    table.add_row("Description", _cell(output.description))
+    console.print(table)
+    objects = Table(title="Objects (confidence: none reported by the model)")
+    for col in ("Type", "Activity", "Attributes"):
+        objects.add_column(col)
+    for obj in output.objects:
+        attrs = ", ".join(f"{k}={v}" for k, v in obj.attributes.items())
+        objects.add_row(_cell(obj.type.value), _cell(obj.activity or "-"), _cell(attrs or "-"))
+    console.print(objects)
     return 0
 
 
@@ -723,8 +871,24 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
     )
     vid.add_argument("video", help="path to a local video file")
     vid.add_argument("--db", required=True, help="SQLite database path (created if missing)")
-    vid.add_argument("--provider", choices=["cassette"], default="cassette")
-    vid.add_argument("--cassette", help="cassette JSON with recorded provider responses (replay)")
+    vid.add_argument("--provider", choices=["cassette", "gemini"], default="cassette")
+    vid.add_argument("--cassette", help="cassette JSON: replayed, or written with record mode")
+    vid.add_argument(
+        "--cassette-mode",
+        choices=[m.value for m in CassetteMode],
+        default=CassetteMode.REPLAY.value,
+        help="replay (default, no API), record (gemini; saves responses) or live (no cassette)",
+    )
+    vid.add_argument("--model", help="Gemini model (default: GEMINI_MODEL from env/.env)")
+    vid.add_argument("--max-dimension", type=int, default=1024, help="longest side sent to Gemini")
+    vid.add_argument("--jpeg-quality", type=int, default=85, help="JPEG quality sent to Gemini")
+    vid.add_argument(
+        "--default-confidence",
+        type=float,
+        default=None,
+        help="placeholder confidence for objects the provider gives none (Gemini: 0.5, "
+        "uncalibrated)",
+    )
     vid.add_argument("--sample-every", type=float, default=2.0, metavar="SECONDS")
     vid.add_argument("--no-gate", action="store_true", help="send every sampled frame")
     vid.add_argument("--gate-threshold", type=float, default=6.0, help="mean abs pixel diff, 0-255")
@@ -739,7 +903,7 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
     vid.add_argument(
         "--start",
         type=_parse_time,
-        default="2026-09-29T23:40:00+05:30",
+        default=DEFAULT_VIDEO_START,
         help="SIMULATED wall-clock time of video start (used when no --timeline)",
     )
     vid.add_argument(
@@ -749,6 +913,17 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
         help="SIMULATED zone for the whole video (used when no --timeline)",
     )
     vid.add_argument("--verbose", action="store_true", help="list every sample candidate")
+
+    one = sub.add_parser(
+        "describe-frame",
+        help="API smoke test: describe ONE video frame with Gemini (stores nothing)",
+    )
+    one.add_argument("video", help="path to a local video file")
+    one.add_argument("--time", type=float, required=True, metavar="SECONDS")
+    one.add_argument("--provider", choices=["gemini"], default="gemini")
+    one.add_argument("--model", help="Gemini model (default: GEMINI_MODEL from env/.env)")
+    one.add_argument("--max-dimension", type=int, default=1024)
+    one.add_argument("--jpeg-quality", type=int, default=85)
 
     demo = sub.add_parser(
         "make-demo-video", help="write a tiny synthetic test video and a matching demo cassette"
@@ -775,6 +950,8 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
         return alerts_command(args, console)
     if args.command == "ingest-video":
         return ingest_video_command(args, console)
+    if args.command == "describe-frame":
+        return describe_frame_command(args, console)
     return make_demo_video_command(args.out_dir, console)
 
 

@@ -250,3 +250,19 @@ gate behaviour (first frame, identical, changed, drift, boundary, disabled, rese
 output validation (13 malformed shapes), observation construction, cassette round trip/determinism/safe contents/invalid files, replay/miss/mismatch, record and live modes
 with a FAKE describer (no real model), stable frame identity, video ingest into SQLite, unchanged events/entities/alerts from video observations, CLI success and failure paths (a failure
 leaves no database), and an M1-M4 regression check (7 events, 2 entities, 1 multi-appearance entity, 6 alerts; `normal_day` 0 alerts).
+
+## M5B: Gemini FrameDescriber (single-frame smoke test, record/replay wiring)
+**Tool:** Claude Code (Claude Sonnet 5.5), from my M5B spec.
+
+**What the AI generated:** `vision/gemini.py` (config, image preparation, error classes, retry policy, structured-output request), `read_frame_at` (decode one frame),
+the `describe-frame` command, `--provider gemini` / `--cassette-mode` / `--model` on `ingest-video` (with cassette flush-on-failure and resume), `.env` loading, and 38 offline tests.
+
+**Design decisions the AI made (please review)**
+- No manual BGR->RGB conversion: `cv2.imencode` wants BGR, so converting first would swap colors in the JPEG. I deviated from the literal spec for that reason and added a test.
+- Gemini is not asked for confidence; the schema drops the field and a documented placeholder (0.5, uncalibrated) fills it downstream. The shared contract and M5A cassette tests are unchanged.
+- The prompt is the shared `PROVIDER_INSTRUCTIONS` plus a one-line exception; I did not edit the shared text.
+- Retries are bounded: 2 for rate limit/transient, 1 for malformed output; auth, bad model and bad requests never retry; errors are scrubbed of the key and not chained.
+
+**Validation:** all unit tests mock the SDK (no network). Live checks I ran with my own key: one frame of the synthetic demo video through `describe-frame`, then a record run and a zero-call replay of the
+same video with equivalent observations. The frames are synthetic rectangles, so the descriptions show the plumbing works, not that the model recognises real scenes.
+**Honest notes:** the record run made 5 requests for 4 accepted frames (one retry, cause not recorded in the summary). Latency was several seconds per call. Real footage has not been evaluated yet.

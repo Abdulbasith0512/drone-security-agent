@@ -16,7 +16,7 @@ import numpy as np
 from pydantic import Field
 
 from drone_agent.models import DomainModel
-from drone_agent.video.source import VideoMetadata, VideoSource
+from drone_agent.video.source import VideoError, VideoMetadata, VideoSource
 
 
 class SamplingConfig(DomainModel):
@@ -117,3 +117,33 @@ def sample_frames(
                         image=image,
                     )
             position += 1
+
+
+def read_frame_at(source: VideoSource, seconds: float) -> SampledFrame:
+    """Decode exactly one frame: the one nearest `seconds` (same rounding as the sampler)."""
+    meta = source.metadata
+    if not math.isfinite(seconds) or seconds < 0:
+        raise VideoError("time must be a non-negative number of seconds")
+    index = math.floor(seconds * meta.fps + 0.5)
+    if index >= meta.frame_count:
+        raise VideoError(
+            f"time {seconds:g}s is beyond the end of the video ({meta.duration_seconds:.2f}s)"
+        )
+    with source.capture() as cap:
+        for _ in range(index):
+            if not cap.grab():
+                raise VideoError(f"video ended before frame {index}")
+        ok, image = cap.read()
+    if not ok or image is None:
+        raise VideoError(f"could not decode frame {index}")
+    return SampledFrame(
+        frame_id=index,
+        frame_index=index,
+        offset_seconds=index / meta.fps,
+        source=meta.source_name,
+        width=int(image.shape[1]),
+        height=int(image.shape[0]),
+        frame_key=f"{meta.sha256[:16]}:{index}",
+        content_hash=content_hash(image),
+        image=image,
+    )

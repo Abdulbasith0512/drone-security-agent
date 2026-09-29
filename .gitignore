@@ -1,0 +1,55 @@
+# --- CONFIDENTIAL: FlytBase assignment document must never be committed ---
+docs/*.pdf
+*Assignment*.pdf
+*assignment*.pdf
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# --- Databases ---
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# --- Generated data (frames, caches, VLM cassettes recorded locally) ---
+data/
+frames/
+.cache/
+cache/
+output/
+runs/
+
+# --- Videos (large; share via links). Whitelist tiny fixtures if ever needed ---
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+# --- Editor/OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

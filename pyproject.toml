@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drone-agent"
+version = "0.1.0"
+description = "Drone Security Analyst Agent prototype (video + telemetry -> events -> alerts -> Q&A)"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.5",               # validates scenario / VLM output, defines domain models
+    "opencv-python-headless>=4.8", # frame sampling, resize, frame-diff gate
+    "PyYAML>=6.0",                 # scenarios, zones, rule thresholds
+    "rich>=13.0",                  # CLI console output
+]
+
+[project.optional-dependencies]
+agent = ["langchain-core>=0.3"]    # analyst Q&A layer only (drone_agent/agent)
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[tool.setuptools.packages.find]
+include = ["drone_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

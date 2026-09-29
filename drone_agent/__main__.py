@@ -18,9 +18,11 @@ from drone_agent.models import (
     MatchLevel,
     ObjectType,
     Observation,
+    Severity,
     Zone,
 )
 from drone_agent.pipeline import ConfigError, build_events, load_config
+from drone_agent.rules import analyze, load_rules_config
 from drone_agent.scenario import ScenarioError, load_scenario
 from drone_agent.simulate import run_scenario
 from drone_agent.store import DuplicateRecordError, Fts5UnavailableError, Store, StoreError
@@ -246,6 +248,11 @@ def build_events_command(db: str, config_path: str | None, console: Console) -> 
         "Replaced previous",
         _cell(f"{summary.replaced_events} events, {summary.replaced_entities} entities"),
     )
+    if summary.discarded_alerts:
+        table.add_row(
+            "Alerts discarded (they cited old events)",
+            _cell(f"{summary.discarded_alerts}; run `analyze` again"),
+        )
     console.print(table)
     return 0
 
@@ -383,6 +390,123 @@ def entities_command(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+# ---- M4 commands ----------------------------------------------------------------------------
+def analyze_command(db: str, rules_path: str | None, console: Console) -> int:
+    try:
+        config = load_rules_config(rules_path)
+        with Store.open(db) as store:
+            _note_migration(console, store)
+            summary = analyze(store, config)
+    except (ConfigError, StoreError) as exc:
+        _error(console, str(exc))
+        return 1
+
+    table = Table(
+        title="Security analysis summary (deterministic rules, no LLM)", show_header=False
+    )
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Events analyzed", _cell(summary.events_analyzed))
+    table.add_row("Entities analyzed", _cell(summary.entities_analyzed))
+    table.add_row("Alerts generated", _cell(summary.alerts))
+    by_rule = ", ".join(f"{k}: {v}" for k, v in summary.by_rule.items()) or "-"
+    table.add_row("Alerts by rule", _cell(by_rule))
+    order = {s.value: s.rank for s in Severity}
+    by_sev = sorted(summary.by_severity.items(), key=lambda kv: -order[kv[0]])
+    table.add_row("Alerts by severity", _cell(", ".join(f"{k}: {v}" for k, v in by_sev) or "-"))
+    table.add_row("Replaced previous alerts", _cell(summary.replaced_alerts))
+    console.print(table)
+    if summary.events_analyzed == 0:
+        console.print("no events to analyze (run `build-events` first?)")
+    return 0
+
+
+def _show_alert(store: Store, alert_id: str, console: Console) -> int:
+    alert = store.get_alert(alert_id)
+    if alert is None:
+        _error(console, f"no alert {alert_id}")
+        return 1
+    console.print(Text.assemble((alert.alert_id, "bold"), f"  {alert.title}"))
+    for label, value in (
+        ("rule", alert.rule_id),
+        ("severity", alert.severity.value),
+        ("triggered at", alert.triggered_at.isoformat()),
+        ("evidence span", f"{alert.first_seen.isoformat()} -> {alert.last_seen.isoformat()}"),
+        ("zone", alert.zone.value if alert.zone else "-"),
+        ("reason", alert.message),
+    ):
+        console.print(_cell(f"{label + ':':14} {value}"))
+
+    facts = Table(title="Rule facts (why it fired)", show_header=False)
+    facts.add_column(style="bold")
+    facts.add_column()
+    for key, value in alert.facts.items():
+        facts.add_row(_cell(key), _cell(value))
+    console.print(facts)
+
+    if alert.entity_id:
+        entity = store.get_entity(alert.entity_id)
+        if entity:
+            console.print(_cell(f"entity: {_entity_summary(entity)}"))
+    events = [e for e in (store.get_event(eid) for eid in alert.event_ids) if e]
+    console.print(_event_table(events, "Events that triggered the alert"))
+
+    evidence = Table(title="Evidence: alert -> events -> observations -> frames")
+    for col in ("Frame", "Time", "Observation", "Event", "Description"):
+        evidence.add_column(col, overflow="fold")
+    for ev in events:
+        for obs in store.get_event_observations(ev.event_id):
+            evidence.add_row(
+                _cell(obs.frame_id),
+                _cell(_clock(obs.timestamp)),
+                _cell(obs.observation_id),
+                _cell(ev.event_id),
+                _cell(obs.description),
+            )
+    console.print(evidence)
+    console.print(
+        _cell(
+            f"trace: {alert.alert_id} -> events {', '.join(alert.event_ids)} -> "
+            f"frames {_frame_ranges(alert.frame_ids)}"
+        )
+    )
+    return 0
+
+
+def alerts_command(args: argparse.Namespace, console: Console) -> int:
+    try:
+        with Store.open(args.db) as store:
+            _note_migration(console, store)
+            if args.show:
+                return _show_alert(store, args.show, console)
+            alerts = store.query_alerts(
+                rule_id=args.rule,
+                severity=Severity(args.severity) if args.severity else None,
+                zone=Zone(args.zone) if args.zone else None,
+            )
+    except StoreError as exc:
+        _error(console, str(exc))
+        return 1
+    if not alerts:
+        console.print("no alerts found (none fired, or `analyze` has not been run yet)")
+        return 0
+    table = Table(title=f"{len(alerts)} alert(s)")
+    for col in ("Alert", "Rule", "Severity", "Triggered", "Zone", "Summary", "Events"):
+        table.add_column(col, overflow="fold")
+    for a in alerts:
+        table.add_row(
+            _cell(a.alert_id),
+            _cell(a.rule_id),
+            _cell(a.severity.value),
+            _cell(_clock(a.triggered_at)),
+            _cell(a.zone.value if a.zone else "-"),
+            _cell(a.title),
+            _cell(", ".join(a.event_ids)),
+        )
+    console.print(table)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, console: Console | None = None) -> int:
     parser = argparse.ArgumentParser(prog="drone_agent")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -421,6 +545,19 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
     ent.add_argument("--db", required=True, help="SQLite database path")
     ent.add_argument("--show", metavar="ENTITY_ID", help="show an entity's appearances")
 
+    ana = sub.add_parser("analyze", help="run the deterministic security rules over stored events")
+    ana.add_argument("--db", required=True, help="SQLite database path")
+    ana.add_argument(
+        "--rules", help="rules YAML (default: built-in, see config/security_rules.yaml)"
+    )
+
+    alr = sub.add_parser("alerts", help="list alerts, or trace one alert to its evidence")
+    alr.add_argument("--db", required=True, help="SQLite database path")
+    alr.add_argument("--rule", help="only this rule id, e.g. loitering")
+    alr.add_argument("--severity", choices=[s.value for s in Severity])
+    alr.add_argument("--zone", choices=[z.value for z in Zone])
+    alr.add_argument("--show", metavar="ALERT_ID", help="show reason, facts and evidence")
+
     args = parser.parse_args(argv)
     console = console or Console()
     if args.command == "simulate":
@@ -433,7 +570,11 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
         return build_events_command(args.db, args.config, console)
     if args.command == "events":
         return events_command(args, console)
-    return entities_command(args, console)
+    if args.command == "entities":
+        return entities_command(args, console)
+    if args.command == "analyze":
+        return analyze_command(args.db, args.rules, console)
+    return alerts_command(args, console)
 
 
 if __name__ == "__main__":

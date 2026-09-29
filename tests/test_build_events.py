@@ -223,9 +223,28 @@ def test_m2_database_is_upgraded_in_place_without_losing_data(tmp_path):
         assert store.migrated_from == 1
         assert store.get_observation("obs-1").description == "old data"
         assert store.count_events() == 0 and store.count_entities() == 0
-        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert (
+            store._conn.execute("PRAGMA user_version").fetchone()[0] == schema_module.SCHEMA_VERSION
+        )
+        assert store.count_alerts() == 0
     with Store.open(path) as store:
         assert store.migrated_from is None  # already current
+
+
+def test_m3_database_is_upgraded_to_add_alert_tables(tmp_path):
+    """An M3 database (events already built) gains the alert tables and keeps its events."""
+    path = tmp_path / "m3.db"
+    with Store.open(path) as store:
+        built_store(SECURITY, store)
+        # rewind to what an M3 database looked like: no alert tables, version 2
+        store._conn.execute("DROP TABLE alert_events")
+        store._conn.execute("DROP TABLE alerts")
+        store._conn.execute("PRAGMA user_version = 2")
+    with Store.open(path) as store:
+        assert store.migrated_from == 2
+        assert store.count_events() == 7 and store.count_entities() == 2
+        assert store.count_alerts() == 0
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_database_from_a_newer_version_is_refused(tmp_path):

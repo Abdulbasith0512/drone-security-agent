@@ -9,12 +9,14 @@ import sqlite3
 from datetime import datetime
 
 from drone_agent.models import (
+    Alert,
     CloseReason,
     Entity,
     Event,
     MatchLevel,
     ObjectType,
     Observation,
+    Severity,
     Zone,
 )
 from drone_agent.store.codec import canonical_json, utc_key
@@ -29,8 +31,11 @@ class DerivedMixin:
     _conn: sqlite3.Connection
 
     # ---- writes ----------------------------------------------------------------------------
-    def replace_derived(self, events: list[Event], entities: list[Entity]) -> tuple[int, int]:
-        """Atomically replace ALL stored events and entities. Returns the previous counts.
+    def replace_derived(self, events: list[Event], entities: list[Entity]) -> tuple[int, int, int]:
+        """Atomically replace ALL stored events and entities.
+
+        Returns the previous (events, entities, alerts) counts. Alerts reference events, so they
+        are discarded too; run the rule engine again afterwards.
 
         Evidence links must point at stored observations (foreign keys). An event's `entity_id`
         must agree with the entity that lists it.
@@ -44,7 +49,7 @@ class DerivedMixin:
             raise StoreError(f"entities reference unknown events: {sorted(unknown)}")
 
         with self.transaction():  # type: ignore[attr-defined]
-            previous = self.count_events(), self.count_entities()
+            previous = self.count_events(), self.count_entities(), self.count_alerts()
             self.clear_derived()
             try:
                 for ev in events:
@@ -56,9 +61,17 @@ class DerivedMixin:
             return previous
 
     def clear_derived(self) -> None:
-        """Delete all events, evidence links and entities (children first)."""
+        """Delete all alerts, events, evidence links and entities (children first)."""
         with self.transaction():  # type: ignore[attr-defined]
-            for table in ("entity_events", "entities", "event_observations", "events"):
+            tables = (
+                "alert_events",
+                "alerts",
+                "entity_events",
+                "entities",
+                "event_observations",
+                "events",
+            )
+            for table in tables:
                 self._conn.execute(f"DELETE FROM {table}")
 
     def _insert_event(self, ev: Event) -> None:
@@ -223,6 +236,126 @@ class DerivedMixin:
                     "first_seen": datetime.fromisoformat(r["first_seen"]),
                     "last_seen": datetime.fromisoformat(r["last_seen"]),
                     "event_ids": members[r["entity_id"]],
+                }
+            )
+            for r in rows
+        ]
+
+    # ---- alerts ----------------------------------------------------------------------------
+    def replace_alerts(self, alerts: list[Alert]) -> int:
+        """Atomically replace ALL stored alerts with `alerts`. Returns the previous count.
+
+        Alerts are derived (events + entities + rules), so a re-run replaces them; deterministic
+        alert ids mean unchanged inputs give identical rows. Links must reference stored events
+        and entities (foreign keys).
+        """
+        with self.transaction():  # type: ignore[attr-defined]
+            previous = self.count_alerts()
+            self._conn.execute("DELETE FROM alert_events")
+            self._conn.execute("DELETE FROM alerts")
+            try:
+                for alert in alerts:
+                    self._insert_alert(alert)
+            except sqlite3.IntegrityError as exc:
+                raise translate_integrity_error(exc, "alert data") from exc
+            return previous
+
+    def _insert_alert(self, a: Alert) -> None:
+        self._conn.execute(
+            "INSERT INTO alerts (alert_id, rule_id, severity, title, message, triggered_at,"
+            " triggered_at_utc, first_seen, first_seen_utc, last_seen, last_seen_utc, zone,"
+            " entity_id, facts_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                a.alert_id,
+                a.rule_id,
+                a.severity.value,
+                a.title,
+                a.message,
+                a.triggered_at.isoformat(),
+                utc_key(a.triggered_at),
+                a.first_seen.isoformat(),
+                utc_key(a.first_seen),
+                a.last_seen.isoformat(),
+                utc_key(a.last_seen),
+                a.zone.value if a.zone else None,
+                a.entity_id,
+                canonical_json(a.facts),
+            ),
+        )
+        self._conn.executemany(
+            "INSERT INTO alert_events (alert_id, event_id) VALUES (?, ?)",
+            [(a.alert_id, eid) for eid in a.event_ids],
+        )
+
+    def count_alerts(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+
+    def get_alert(self, alert_id: str) -> Alert | None:
+        rows = self._alert_rows("a.alert_id = ?", [alert_id])
+        return rows[0] if rows else None
+
+    def query_alerts(
+        self,
+        *,
+        rule_id: str | None = None,
+        severity: Severity | None = None,
+        zone: Zone | None = None,
+    ) -> list[Alert]:
+        """Alerts matching ALL given filters, ordered by triggered_at then alert_id."""
+        where, params = [], []
+        if rule_id is not None:
+            where.append("a.rule_id = ?")
+            params.append(rule_id)
+        if severity is not None:
+            where.append("a.severity = ?")
+            params.append(Severity(severity).value)
+        if zone is not None:
+            where.append("a.zone = ?")
+            params.append(Zone(zone).value)
+        return self._alert_rows(" AND ".join(where) or "1 = 1", params)
+
+    def _alert_rows(self, condition: str, params: list[object]) -> list[Alert]:
+        rows = self._conn.execute(
+            f"SELECT a.* FROM alerts a WHERE {condition} ORDER BY a.triggered_at_utc, a.alert_id",
+            params,
+        ).fetchall()
+        events: dict[str, list[str]] = {r["alert_id"]: [] for r in rows}
+        frames: dict[str, set[int]] = {r["alert_id"]: set() for r in rows}
+        ids = list(events)
+        for i in range(0, len(ids), _IN_CHUNK):
+            chunk = ids[i : i + _IN_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            for r in self._conn.execute(
+                "SELECT ae.alert_id, ae.event_id FROM alert_events ae"
+                " JOIN events e ON e.event_id = ae.event_id"
+                f" WHERE ae.alert_id IN ({marks}) ORDER BY e.first_seen_utc, e.event_id",
+                chunk,
+            ):
+                events[r["alert_id"]].append(r["event_id"])
+            for r in self._conn.execute(
+                "SELECT ae.alert_id, o.frame_id FROM alert_events ae"
+                " JOIN event_observations eo ON eo.event_id = ae.event_id"
+                " JOIN observations o ON o.observation_id = eo.observation_id"
+                f" WHERE ae.alert_id IN ({marks})",
+                chunk,
+            ):
+                frames[r["alert_id"]].add(r["frame_id"])
+        return [
+            Alert.model_validate(
+                {
+                    "alert_id": r["alert_id"],
+                    "rule_id": r["rule_id"],
+                    "severity": r["severity"],
+                    "title": r["title"],
+                    "message": r["message"],
+                    "triggered_at": datetime.fromisoformat(r["triggered_at"]),
+                    "first_seen": datetime.fromisoformat(r["first_seen"]),
+                    "last_seen": datetime.fromisoformat(r["last_seen"]),
+                    "zone": r["zone"],
+                    "event_ids": events[r["alert_id"]],
+                    "entity_id": r["entity_id"],
+                    "frame_ids": sorted(frames[r["alert_id"]]),
+                    "facts": json.loads(r["facts_json"]),
                 }
             )
             for r in rows

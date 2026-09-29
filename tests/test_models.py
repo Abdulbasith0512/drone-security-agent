@@ -156,8 +156,49 @@ def test_entity_is_vehicle_only_and_labels_do_not_overclaim():
         Entity(**{**kwargs, "entity_type": ObjectType.PERSON})
 
 
-def test_alert_schema_accepts_severity_and_rejects_unknown():
-    kwargs = dict(alert_id="a1", rule_id="loitering", timestamp=T0, message="m")
-    assert Alert(severity=Severity.WARNING, **kwargs).frame_ids == []
+def _alert(**overrides) -> Alert:
+    data = dict(
+        alert_id="ALR-LOITER-EVT-P-001",
+        rule_id="loitering",
+        severity=Severity.MEDIUM,
+        title="Person loitering at main_gate",
+        message="Person stayed for 480s",
+        triggered_at=T0 + timedelta(seconds=300),
+        first_seen=T0,
+        last_seen=T0 + timedelta(seconds=480),
+        zone=Zone.MAIN_GATE,
+        event_ids=["EVT-P-001"],
+        frame_ids=[1, 2, 3],
+        facts={"duration_seconds": 480.0, "threshold_seconds": 300.0, "zones": ["main_gate"]},
+    )
+    data.update(overrides)
+    return Alert(**data)
+
+
+def test_alert_round_trips_and_carries_facts_and_evidence_links():
+    alert = _alert(entity_id="ENT-V-001")
+    assert Alert.model_validate_json(alert.model_dump_json()) == alert
+    assert alert.facts["threshold_seconds"] == 300.0
+    assert alert.event_ids == ["EVT-P-001"] and alert.frame_ids == [1, 2, 3]
+
+
+def test_alert_validation_rejects_bad_severity_times_and_missing_evidence():
     with pytest.raises(ValidationError):
-        Alert(severity="urgent", **kwargs)
+        _alert(severity="urgent")
+    with pytest.raises(ValidationError):
+        _alert(severity="warning")  # the pre-M4 name no longer exists
+    with pytest.raises(ValidationError, match="triggered_at"):
+        _alert(triggered_at=T0 - timedelta(seconds=1))
+    with pytest.raises(ValidationError):
+        _alert(event_ids=[])
+    with pytest.raises(ValidationError):
+        _alert(frame_ids=[])
+    with pytest.raises(ValidationError):
+        _alert(facts={"nested": {"not": "allowed"}})
+    with pytest.raises(ValidationError):
+        _alert(triggered_at=datetime(2026, 9, 29, 23, 45))  # naive
+
+
+def test_severity_is_ordered():
+    ranks = [s.rank for s in (Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL)]
+    assert ranks == [0, 1, 2, 3]

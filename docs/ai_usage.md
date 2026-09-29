@@ -159,3 +159,52 @@ tests (blue/dark-blue merge, sedan separation, missing attributes, overlap, peop
 persistence tests (round trip, foreign keys, atomic replace, idempotent rebuild, migration, newer-version refusal);
 scenario tests against the M1 ground truth; CLI tests; and a raw-SQL integrity inspection (`PRAGMA integrity_check`
 ok, `foreign_key_check` empty, evidence rows equal detections, no evidence outside an event's span or zone).
+
+## M4: Deterministic security rules and alerts
+**Tool:** Claude Code (Claude Sonnet 5.5), from my detailed M4 spec.
+
+**What the AI generated:** the redesigned `Alert` model and `Severity` levels, the rule configuration models and
+`config/security_rules.yaml`, four rule functions, `RuleEngine`, `analyze`, schema v3 with alert persistence, the
+`analyze`/`alerts` CLI commands, 80 new tests (244 total), and these docs. No LLM is called anywhere in M4, by design.
+
+**Model change (please review):** `Severity` was replaced by `low/medium/high/critical` and the M1 `Alert` placeholder
+was redesigned (see docs/architecture.md). One M1 test changed accordingly.
+
+**Design decisions the AI made (please review)**
+- **Overlap policy: rules coexist.** I recommended (and you allowed) independent rules with dedup only on identical
+  (rule, subject). So a night-time loiterer gets two alerts. I did not add cross-rule suppression: it would couple the rules
+  and hide information. Cost: more alerts per situation (6 alerts for 4 situations in `security_events`).
+- **After-hours defaults to people only.** With vehicles included the same pickup would raise four extra after-hours
+  alerts on top of the repeat-vehicle alert. Vehicles are one config line away, and this is documented as a false-negative mode.
+- **Threshold boundary is inclusive** (`duration >= threshold`), `triggered_at` is computed from event timestamps
+  (first_seen + threshold for loitering), and the after-hours window is `[from, until)` with overlap semantics for events
+  that straddle a boundary.
+- **Timezone handling is explicit**: closed hours use the timestamp's own offset unless `utc_offset` is configured; the system clock is never used.
+- **Alerts are replaced, not appended**, on each `analyze`; `build-events` discards alerts because they cite events it replaces.
+- Alert ids are `ALR-<RULE>-<event or entity id>` so identity, not a counter, decides duplicates.
+
+**Results were not tuned.** I ran the rules on both scenarios with the defaults and reported what came out:
+`security_events` -> 6 alerts (after-hours 3, loitering 1, repeat vehicle 1, restricted zone 1); `normal_day` -> 0 alerts.
+I did not adjust thresholds or scenarios to reach a number, and nothing is special-cased per scenario.
+
+**Problems found during validation (honest log)**
+- PyYAML reads an unquoted `22:00` as the integer 1320 (base-60). I found this while designing the config and made the loader
+  reject unquoted times with a clear message; the shipped YAML quotes them and a test covers it.
+- Two existing tests failed because of intended changes (schema version 2 -> 3, `Alert`/`Severity`); I updated them and
+  added a real M3 -> v3 migration test.
+- One of my new tests expected the wrong alert order (I forgot loitering triggers at 23:46, after the two 23:41 alerts).
+  The engine's `(triggered_at, rule order)` sort was right; I fixed the test.
+- All new tests passed quickly, so I ran eight deliberate mutations (loitering `>` vs `>=`, after-hours end inclusive,
+  start exclusive, previous-evening window dropped, repeat-vehicle threshold off by one, overclaiming "same vehicle
+  returned" wording, engine de-duplication removed, restricted-zone check removed). Every one was caught by the suite;
+  the code was restored afterwards.
+- `alerts` printed "run `analyze` first?" on `normal_day` even after a correct analysis found nothing; I reworded it.
+- I made these edits with file tools after a long shell command failed to parse; nothing was executed from the failed command.
+
+**How behaviour was validated:** rule unit tests at every boundary you listed (below/at/above threshold, 21:59:59 / 22:00:00 /
+23:59:59 / 00:00:00 / 05:59:59 / 06:00:00 / midday, straddling events, non-midnight windows, UTC vs configured offsets,
+1/2/3/5 appearances, coarse vs confirmed wording, a different vehicle, allowed vs restricted zone, multi-frame event), config
+validation (13 invalid files), engine determinism/dedup/overlap, database round trip against an independent engine run, evidence
+chain to frames, foreign-key and CHECK enforcement, atomic failed replace, idempotent re-analysis, config-change replacement,
+alert discard on rebuild, `security_events` and `normal_day` end to end, CLI tests, and a raw-SQL integrity inspection
+(`integrity_check` ok, `foreign_key_check` empty, every alert has events and evidence frames, `triggered_at` inside its span).

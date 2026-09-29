@@ -39,7 +39,7 @@ Rules decide; the LLM explains and answers from tool output only.
 ```
 drone_agent/
   models/ telemetry/ vision/ store/ pipeline/ rules/ agent/   # agent/ is the only place langchain is imported
-config/events.yaml                                           # M3 thresholds
+config/events.yaml  config/security_rules.yaml            # M3 event thresholds, M4 rule config
 scenarios/  tests/  bench/  docs/
 ```
 Dependency direction: `agent` -> `store`; `rules` -> `models`; core packages never import `agent`.
@@ -253,3 +253,115 @@ source evidence and must never be silently overwritten.
 `build-events --db DB [--config YAML]`, `events --db DB [--zone] [--object] [--entity] [--evidence EVENT_ID]`,
 `entities --db DB [--show ENTITY_ID]`. `--evidence` prints the chain event -> observations -> frames and marks frames
 where the detector missed as "gap tolerated". Table cells are printed literally (never parsed as Rich markup).
+
+---
+
+# Deterministic security rules and alerts (M4)
+
+Implemented in `drone_agent/rules/` (`loitering.py`, `after_hours.py`, `repeat_vehicle.py`, `restricted_zone.py`,
+`engine.py`, `config.py`, `analyze.py`), persisted by `store/derived.py`, configured in `config/security_rules.yaml`.
+
+```
+FRAME -> OBSERVATION -> EVENT -> ENTITY MEMORY -> DETERMINISTIC SECURITY RULES -> ALERT
+                                                       ^ config/security_rules.yaml
+```
+
+**What this is (and is not).** VLM-derived observations feed deterministic temporal security rules. The rules decide
+whether an alert exists; the alert carries the numbers the rule compared and links back to the events and frames
+behind it. No LLM is called, and none may create, suppress, escalate or change an alert. The system does not
+"detect threats with AI"; it flags patterns (dwell time, time of day, repetition, zone) that a person configured as
+worth attention, on top of noisy VLM descriptions. A later LLM layer (M6) may only *explain* alerts.
+
+## The four rules (defaults from `config/security_rules.yaml`)
+| Rule | Fires when | Default configuration | Severity | Alert id |
+|---|---|---|---|---|
+| `loitering` | an event of a monitored type in a monitored zone has `duration_seconds >= threshold_seconds` | person; `main_gate` 300 s | medium | `ALR-LOITER-<event>` |
+| `after_hours_presence` | an event of a monitored type overlaps the daily closed window | person; window `22:00`-`06:00`; all zones; local time of the timestamps | medium | `ALR-AFTERHOURS-<event>` |
+| `repeat_vehicle` | a coarse vehicle Entity has `appearance_count >= minimum_appearances` | 3 separate appearances | low | `ALR-REPEAT-<entity>` |
+| `restricted_zone_entry` | an event of a monitored type is in a restricted zone | `restricted_zone`; person and vehicle | high | `ALR-RESTRICTED-<event>` |
+
+Each rule is a plain function `evaluate(events[, entities], config) -> list[Alert]`, independent of the others and
+tested on its own. There is no rules framework or DSL. `RuleEngine.run()` calls the enabled rules, collapses identical
+alert ids and sorts by `(triggered_at, rule order, alert_id)`.
+
+* **Loitering** uses the event's duration, never a frame count or frame id, so the tolerated missed detection in
+  `security_events` (frame 5) is irrelevant: M3 already made frames 1-9 one 480 s event. Boundary: a duration exactly
+  equal to the threshold fires (`>=`), because the threshold is "the dwell time at which we alert".
+* **After hours** compares wall-clock time with the window `[closed_from, closed_until)`: `closed_from` is inside,
+  `closed_until` is outside, and if `closed_until <= closed_from` the window crosses midnight. An event fires if any
+  part of it overlaps a window (so 21:58-22:03 fires, 21:50-21:55 does not, 05:58-06:03 fires, an event starting at 06:00
+  does not). Candidate windows start the evening before the event, so 00:11 is checked against the previous night's
+  22:00-06:00 window. **Time zone assumption:** times are property-local wall-clock times. With `utc_offset: null` each
+  event's own UTC offset is used (the scenarios are stamped +05:30); a configured `utc_offset` such as `"+05:30"` converts
+  every event to that offset first. The computer's clock is never read, so runs are reproducible; only fixed UTC offsets
+  are supported (no daylight-saving rules). Times in the YAML must be quoted (`"22:00"`), because YAML reads an unquoted
+  `22:00` as the number 1320; the loader rejects that with a clear message.
+* **Repeat vehicle** counts *separate events* of one Entity, once, at the configured threshold state: one alert per
+  entity, even if it has 5 appearances (`appearance_count` is in the facts and `triggered_at` is the start of the appearance that
+  reached the minimum). Wording is deliberately hedged: "A similar blue pickup was observed in 3 separate appearances
+  ... This is a coarse attribute match; it does not confirm the same vehicle." A plate-confirmed entity is worded as
+  confirmed. The `match_level` (`coarse_match` / `confirmed`) is always in the facts.
+* **Restricted zone** works on events, so one continuous stay in `restricted_zone` is one alert, not one per frame.
+
+## Alert model (`models/alert.py`)
+`alert_id`, `rule_id`, `severity`, `title` (what), `message` (why, in words), `triggered_at`, `first_seen`/`last_seen`
+(evidence span), `zone`, `event_ids`, `entity_id`, `frame_ids`, `facts`. **Facts** are machine-readable and
+JSON-serialisable (strings, numbers, booleans, lists of strings), e.g. loitering `{duration_seconds: 480.0,
+threshold_seconds: 300.0, zone: main_gate, ...}`, repeat vehicle `{appearance_count: 3, minimum_appearances: 3,
+match_level: coarse_match, ...}`, after hours `{event_local_time: 00:11:00, closed_from: 22:00, closed_until: 06:00,
+utc_offset: +05:30, ...}`.
+
+**`triggered_at`** is the earliest instant at which the rule's condition held, computed from event timestamps
+(loitering: `first_seen + threshold`; after hours: the start of the overlap with the closed window; repeat vehicle: the
+start of the appearance that reached the minimum; restricted zone: `first_seen`). This is batch analysis of completed
+events: a live variant would fire at the first observation at or after that instant. `first_seen <= triggered_at <= last_seen` is validated.
+
+**Model changes in M4 (please review):** `Severity` changed from `info/warning/critical` to `low/medium/high/critical`
+(a fixed vocabulary; INFO and CRITICAL are unused by the default policy), and the M1 placeholder `Alert` was redesigned
+(`timestamp` became `triggered_at`; added `title`, `first_seen`, `last_seen`, `zone`, `entity_id`, `facts`). One M1 test changed.
+
+## Overlap and de-duplication policy
+1. **Different rules may alert on the same event**, because they describe different risks. A night-time loiterer yields a
+   loitering alert *and* an after-hours alert; a person in `restricted_zone` at night yields a restricted-zone alert *and*
+   an after-hours alert. No rule suppresses another (this keeps every rule independent and testable); consumers can
+   group alerts by `event_ids`. The demo shows it: 6 alerts for 4 distinct situations.
+2. **An identical (rule, subject) pair yields exactly one alert.** The id is `ALR-<RULE>-<event or entity id>`, so the same rule
+   cannot alert twice on the same event/entity, and the engine collapses duplicates.
+3. Rules work on events/entities, not frames, so a long stay is one alert, and one Entity is one repeat-vehicle alert.
+4. **Re-running is idempotent** (below).
+
+## Severity policy
+Fixed per rule and set in the YAML: restricted-zone entry `high`, loitering `medium`, after-hours presence `medium`,
+repeat vehicle `low` (a coarse, similarity-based signal). There is no automatic escalation and no scoring; changing a
+severity is a config edit. No LLM is involved.
+
+## Persistence (schema version 3)
+Added tables: `alerts` (id, rule, severity CHECK-constrained to the four levels, title, message, `triggered_at`,
+`first_seen`, `last_seen` with UTC keys, zone, `entity_id` FK, `facts_json`) and `alert_events` (alert -> event FK). Only links are
+stored: an alert's frames are derived through `alert_events -> event_observations -> observations`, so the chain
+`alert -> event/entity -> observation -> frame` is enforced by foreign keys without duplicating evidence. Indexes:
+`idx_alerts_triggered (triggered_at_utc)` for chronological listings and `idx_alert_events_event (event_id)` for "which alerts cite this event".
+Migration v2 -> v3 is additive; M2 and M3 databases upgrade in place (tested for both).
+
+**Idempotency: replace.** Alerts are a pure function of (events, entities, rules config), so `analyze` rewrites the alerts
+table in ONE transaction. Unchanged inputs give identical alerts (deterministic ids), so re-running never duplicates
+anything; a changed rules file simply yields the alerts of the new rules. `build-events` deletes alerts (they cite events
+that are being replaced and event ids are only stable for one build/config); it reports how many were discarded and the
+user re-runs `analyze`.
+
+## CLI
+`analyze --db DB [--rules YAML]` prints events/entities analyzed, alerts by rule and severity.
+`alerts --db DB [--rule] [--severity] [--zone]` lists alerts; `alerts --db DB --show ALERT_ID` prints the reason, the rule facts,
+the triggering events/entity and the evidence frames, ending with a one-line trace
+(`ALR-LOITER-EVT-P-001 -> events EVT-P-001 -> frames 1-4,6-9`).
+
+## Known false positives and false negatives
+False positives: a delivery driver waiting at the gate for 5+ minutes is "loitering"; authorised night staff trigger
+after-hours alerts (there is no allow-list or schedule); two different vehicles that look alike become one entity and can
+trigger a repeat alert; staff with legitimate access to a restricted zone still alert; a VLM misdescribing an object
+(a statue as a person) alerts as described; zone comes from the drone's position, not from where the object is.
+False negatives: a person who moves between zones, or is missed for longer than the flicker tolerance, becomes several short
+events that may each stay below the loitering threshold; a single sighting has duration 0; vehicles at night do not raise
+an after-hours alert by default (add `vehicle` to `object_types`, at the cost of noise); a vehicle whose colour the VLM
+reports inconsistently splits into two entities and may miss the repeat threshold; nothing is seen while the drone is
+elsewhere. Thresholds are hand-set on two scripted scenarios and are not validated on real footage.

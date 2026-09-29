@@ -28,6 +28,13 @@ class ObjectType(StrEnum):
 
 
 class Severity(StrEnum):
-    INFO = "info"
-    WARNING = "warning"
+    """Alert severity. Set per rule in configuration; never chosen by an LLM."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
     CRITICAL = "critical"
+
+    @property
+    def rank(self) -> int:
+        return ("low", "medium", "high", "critical").index(self.value)

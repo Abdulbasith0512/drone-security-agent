@@ -21,6 +21,7 @@ class BuildSummary:
     multi_appearance_entities: int
     replaced_events: int
     replaced_entities: int
+    discarded_alerts: int
 
     @property
     def compression_ratio(self) -> float | None:
@@ -38,7 +39,7 @@ def build_events(store: Store, config: EventConfig | None = None) -> BuildSummar
     observations = store.query_observations()  # chronological
     events = aggregate_observations(observations, config)
     events, entities = EntityLinker(config).link(events)
-    replaced_events, replaced_entities = store.replace_derived(events, entities)
+    replaced_events, replaced_entities, discarded_alerts = store.replace_derived(events, entities)
 
     def count(kind: ObjectType) -> int:
         return sum(1 for e in events if e.object_type is kind)
@@ -54,4 +55,5 @@ def build_events(store: Store, config: EventConfig | None = None) -> BuildSummar
         multi_appearance_entities=sum(1 for e in entities if e.appearance_count > 1),
         replaced_events=replaced_events,
         replaced_entities=replaced_entities,
+        discarded_alerts=discarded_alerts,
     )

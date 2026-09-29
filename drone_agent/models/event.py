@@ -1,14 +1,10 @@
-"""Event (temporal association of detections) and Alert schemas.
-
-An Event is produced by deterministic temporal association of detections, NOT by computer-vision
-tracking. Alerts are schema only; rules arrive in M4.
-"""
+"""Event: deterministic temporal association of detections (NOT computer-vision tracking)."""
 
 from enum import StrEnum
 
 from pydantic import AwareDatetime, Field, model_validator
 
-from drone_agent.models.base import DomainModel, ObjectType, Severity, Zone
+from drone_agent.models.base import DomainModel, ObjectType, Zone
 
 
 class CloseReason(StrEnum):
@@ -52,13 +48,3 @@ class Event(DomainModel):
         if len(self.frame_ids) != len(self.observation_ids):
             raise ValueError("frame_ids and observation_ids must have the same length")
         return self
-
-
-class Alert(DomainModel):
-    alert_id: str = Field(min_length=1)
-    rule_id: str = Field(min_length=1)
-    severity: Severity
-    timestamp: AwareDatetime
-    message: str = Field(min_length=1)
-    event_ids: list[str] = Field(default_factory=list)
-    frame_ids: list[int] = Field(default_factory=list)

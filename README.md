@@ -3,7 +3,7 @@
 Prototype for the FlytBase AI Engineer assignment: a docked-drone security analyst that turns video and
 telemetry into events, deterministic alerts, searchable history and grounded Q&A.
 
-> **Status: M3 (events and entity memory).** `simulate`, `ingest`, `query`, `build-events`, `events` and `entities` run; alerts, real video and Q&A arrive in later milestones.
+> **Status: M4 (deterministic security rules and alerts).** `simulate`, `ingest`, `query`, `build-events`, `events`, `entities`, `analyze` and `alerts` run; real video/VLM, Q&A and summaries arrive in later milestones.
 
 Design in one line: `FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING`.
 
@@ -26,23 +26,25 @@ No API key and no network are needed. Databases are written under `output/` (git
 ```
 python -m drone_agent simulate scenarios/security_events.yaml          # scripted frames + telemetry sync
 python -m drone_agent ingest   scenarios/security_events.yaml --db output/security.db
-python -m drone_agent query --db output/security.db --zone main_gate
-python -m drone_agent query --db output/security.db --search "blue pickup"
-python -m drone_agent query --db output/security.db --zone main_gate --explain   # SQLite query plan
+python -m drone_agent query --db output/security.db --search "blue pickup"   # also --zone/--object/--start/--end/--explain
 
 python -m drone_agent build-events --db output/security.db                      # observations -> events -> entities
-python -m drone_agent events   --db output/security.db                          # list events
 python -m drone_agent events   --db output/security.db --evidence EVT-P-001     # event -> observations -> frames
 python -m drone_agent entities --db output/security.db --show ENT-V-001         # similar-vehicle entity and its events
+
+python -m drone_agent analyze  --db output/security.db                          # deterministic rules -> alerts
+python -m drone_agent alerts   --db output/security.db                          # list alerts
+python -m drone_agent alerts   --db output/security.db --show ALR-LOITER-EVT-P-001   # reason, facts, evidence frames
 ```
-On `security_events` the 8-minute gate loiterer becomes ONE event (`EVT-P-001`, frames 1-4 and 6-9, frame 5 is a
-tolerated missed detection), and three separate blue-pickup sightings become three events grouped into one
-*similar-vehicle* entity (`ENT-V-001`). People are never linked across events. This is temporal association of
-detections, not object tracking or re-identification (see docs/architecture.md).
-`query` filters are ANDed and can be combined with `--start/--end` (ISO-8601 with a UTC offset).
-`ingest` twice into the same database is rejected and changes nothing (use a new `--db`); `build-events` twice
-replaces the derived events (idempotent). Thresholds live in `config/events.yaml` (`--config` to override).
-Alerts and Q&A arrive in later milestones.
+On `security_events` the pipeline gives 7 events and 6 alerts: a person loitering at the gate for 480 s (frames 1-4 and 6-9;
+frame 5 is a tolerated missed detection), three after-hours person alerts, one restricted-zone entry, and one repeat-vehicle alert
+worded "a *similar* blue pickup was observed in 3 separate appearances" because entity matching is coarse (attributes only,
+never identity). `normal_day` produces no alerts. Every alert lists its rule facts and traces to events and frames.
+
+The rules are deterministic and configured in `config/security_rules.yaml` (thresholds, closed hours 22:00-06:00, restricted zones,
+fixed severities; override with `analyze --rules`). Event thresholds are in `config/events.yaml`. VLM-derived observations feed
+deterministic temporal rules; no LLM decides, suppresses or changes an alert. Re-running `analyze` or `build-events` replaces derived
+data (idempotent); `ingest` twice into one database is rejected. Q&A and summaries arrive in later milestones.
 
 ## Design decisions
 _TBD (M8). See docs/architecture.md._

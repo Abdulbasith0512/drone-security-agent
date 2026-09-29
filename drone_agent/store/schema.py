@@ -6,6 +6,7 @@ indexes (text comparison of ISO strings with different offsets would be wrong).
 
 Version 1 (M2): telemetry, frames, observations, detected_objects, observations_fts.
 Version 2 (M3): events, event_observations, entities, entity_events (derived data).
+Version 3 (M4): alerts, alert_events (derived from events/entities by the rule engine).
 Migrations only ever ADD objects, so an older database keeps all of its data when upgraded.
 """
 
@@ -135,6 +136,41 @@ _V2: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_event_obs_observation ON event_observations(observation_id)",
 )
 
+_V3: tuple[str, ...] = (
+    # Alerts are derived: the rule engine can regenerate them from events + entities + rules.
+    # Only links are stored; an alert's frames come from alert_events -> event_observations.
+    """
+    CREATE TABLE IF NOT EXISTS alerts (
+        alert_id         TEXT PRIMARY KEY,
+        rule_id          TEXT NOT NULL,
+        severity         TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high', 'critical')),
+        title            TEXT NOT NULL,
+        message          TEXT NOT NULL,
+        triggered_at     TEXT NOT NULL,
+        triggered_at_utc TEXT NOT NULL,
+        first_seen       TEXT NOT NULL,
+        first_seen_utc   TEXT NOT NULL,
+        last_seen        TEXT NOT NULL,
+        last_seen_utc    TEXT NOT NULL,
+        zone             TEXT,
+        entity_id        TEXT REFERENCES entities(entity_id),
+        facts_json       TEXT NOT NULL,
+        CHECK (triggered_at_utc >= first_seen_utc AND triggered_at_utc <= last_seen_utc)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS alert_events (
+        alert_id TEXT NOT NULL REFERENCES alerts(alert_id),
+        event_id TEXT NOT NULL REFERENCES events(event_id),
+        PRIMARY KEY (alert_id, event_id)
+    )
+    """,
+    # Chronological alert listings (the main access pattern of `alerts`).
+    "CREATE INDEX IF NOT EXISTS idx_alerts_triggered ON alerts(triggered_at_utc)",
+    # Reverse lookup: which alerts cite this event.
+    "CREATE INDEX IF NOT EXISTS idx_alert_events_event ON alert_events(event_id)",
+)
+
 # target schema version -> statements that bring a (version - 1) database up to it
-MIGRATIONS: dict[int, tuple[str, ...]] = {1: _V1, 2: _V2}
+MIGRATIONS: dict[int, tuple[str, ...]] = {1: _V1, 2: _V2, 3: _V3}
 SCHEMA_VERSION = max(MIGRATIONS)

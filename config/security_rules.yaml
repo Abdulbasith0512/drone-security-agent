@@ -1,0 +1,39 @@
+# Deterministic security rules. These values equal the built-in defaults; pass a modified copy with
+# `analyze --rules`. Rules decide whether an alert exists; no LLM is involved in any of them.
+#
+# Severity is FIXED per rule (low | medium | high | critical). There is no automatic escalation.
+# Overlap policy: different rules MAY alert on the same event (they describe different risks);
+# an identical (rule, event/entity) pair produces exactly one alert.
+
+loitering:
+  enabled: true
+  severity: medium
+  object_types: [person]
+  zones:
+    main_gate:
+      threshold_seconds: 300      # alert once an event's duration reaches 300 s (>=)
+
+after_hours_presence:
+  enabled: true
+  severity: medium
+  object_types: [person]          # add `vehicle` to alert on any vehicle at night (noisier)
+  # Closed window [closed_from, closed_until): the start is inside, the end is outside.
+  # closed_until <= closed_from means the window crosses midnight (22:00 -> 06:00 next day).
+  # Times MUST be quoted: YAML would read an unquoted 22:00 as the number 1320.
+  closed_from: "22:00"
+  closed_until: "06:00"
+  # Property-local time zone. null = use each event's own UTC offset (scenario timestamps are
+  # already local, +05:30). Set e.g. "+05:30" if timestamps might arrive in another offset.
+  utc_offset: null
+  zones: []                       # empty = every zone
+
+repeat_vehicle:
+  enabled: true
+  severity: low
+  minimum_appearances: 3          # separate events of a similar vehicle (coarse entity match)
+
+restricted_zone_entry:
+  enabled: true
+  severity: high
+  zones: [restricted_zone]
+  object_types: [person, vehicle]

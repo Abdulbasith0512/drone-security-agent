@@ -11,6 +11,9 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from drone_agent.agent.build import build_gemini_analyst
+from drone_agent.agent.config import AnalystConfig, AnalystConfigError
+from drone_agent.agent.session import AnalystSession, Answer
 from drone_agent.ingest import ingest_observations, ingest_result
 from drone_agent.models import (
     DetectedObject,
@@ -794,6 +797,82 @@ def describe_frame_command(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def _build_analyst_llm(args: argparse.Namespace, console: Console):
+    """None for the offline template analyst, else the Gemini analyst."""
+    if args.offline or args.provider == "offline":
+        return None
+    config = AnalystConfig.from_env(args.model)
+    llm = build_gemini_analyst(config)
+    console.print("GEMINI_API_KEY configured: yes")
+    console.print(f"Analyst model: {config.model}")
+    return llm
+
+
+def _print_answer(console: Console, question: str, answer: Answer) -> None:
+    # Text objects, not markup: citations look like [event:EVT-V-001].
+    console.print(Text(f"\nQ: {question}", style="bold"))
+    console.print(Text(f"[{answer.label}]", style="dim"))
+    console.print(Text(answer.text))
+    if answer.citations:
+        console.print(Text(f"Verified citations: {' '.join(answer.citations)}", style="dim"))
+    for note in answer.notes:
+        console.print(Text(f"note: {note}", style="yellow"))
+    if answer.metrics:  # LLM-backed answers only; template mode makes no model requests
+        console.print(Text(f"Analyst metrics: {answer.metrics.line()}", style="dim"))
+
+
+def _analyst_session(args: argparse.Namespace, console: Console, store: Store) -> AnalystSession:
+    return AnalystSession(store, _build_analyst_llm(args, console))
+
+
+def _follow_ups(args, console, session: AnalystSession) -> None:
+    for question in args.follow_up or []:
+        _print_answer(console, question, session.ask(question))
+    if getattr(args, "interactive", False):
+        while True:
+            try:
+                question = console.input("\nFollow-up (blank to quit)> ").strip()
+            except EOFError:
+                break
+            if not question:
+                break
+            _print_answer(console, question, session.ask(question))
+
+
+def _open_existing_db(path: str) -> Store:
+    if not Path(path).is_file():
+        raise StoreError(f"database not found: {path}")
+    return Store.open(path)
+
+
+def ask_command(args: argparse.Namespace, console: Console) -> int:
+    if not args.question and not args.interactive:
+        _error(console, "give a QUESTION, or use --interactive")
+        return 2
+    try:
+        with _open_existing_db(args.db) as store:
+            session = _analyst_session(args, console, store)
+            if args.question:
+                _print_answer(console, args.question, session.ask(args.question))
+            _follow_ups(args, console, session)
+    except (StoreError, AnalystConfigError, ValueError) as exc:
+        _error(console, str(exc))
+        return 2
+    return 0
+
+
+def summarize_command(args: argparse.Namespace, console: Console) -> int:
+    try:
+        with _open_existing_db(args.db) as store:
+            session = _analyst_session(args, console, store)
+            _print_answer(console, "Summarize the run.", session.summarize())
+            _follow_ups(args, console, session)
+    except (StoreError, AnalystConfigError, ValueError) as exc:
+        _error(console, str(exc))
+        return 2
+    return 0
+
+
 def make_demo_video_command(out_dir: str, console: Console) -> int:
     from drone_agent.video.synthetic import (
         DEMO_PROVIDER_LABEL,
@@ -925,6 +1004,31 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
     one.add_argument("--max-dimension", type=int, default=1024)
     one.add_argument("--jpeg-quality", type=int, default=85)
 
+    for name, help_text in (
+        ("ask", "ask the analyst a question about the stored evidence (cites evidence ids)"),
+        ("summarize", "summarize the stored run, then optionally ask follow-ups"),
+    ):
+        an = sub.add_parser(name, help=help_text)
+        an.add_argument("--db", required=True, help="SQLite database path (must exist)")
+        if name == "ask":
+            an.add_argument("question", nargs="?", help="the question, in quotes")
+            an.add_argument(
+                "--interactive", "-i", action="store_true", help="keep asking follow-ups"
+            )
+        else:
+            an.add_argument("--interactive", "-i", action="store_true", help="ask follow-ups")
+        an.add_argument(
+            "--follow-up", action="append", metavar="QUESTION", help="a follow-up (repeatable)"
+        )
+        an.add_argument(
+            "--provider",
+            choices=["offline", "gemini"],
+            default="offline",
+            help="offline = deterministic template analyst (default, no key); gemini = LLM",
+        )
+        an.add_argument("--offline", action="store_true", help="same as --provider offline")
+        an.add_argument("--model", help="analyst model (default: ANALYST_MODEL from env/.env)")
+
     demo = sub.add_parser(
         "make-demo-video", help="write a tiny synthetic test video and a matching demo cassette"
     )
@@ -950,6 +1054,10 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
         return alerts_command(args, console)
     if args.command == "ingest-video":
         return ingest_video_command(args, console)
+    if args.command == "ask":
+        return ask_command(args, console)
+    if args.command == "summarize":
+        return summarize_command(args, console)
     if args.command == "describe-frame":
         return describe_frame_command(args, console)
     return make_demo_video_command(args.out_dir, console)

@@ -356,6 +356,56 @@ user re-runs `analyze`.
 the triggering events/entity and the evidence frames, ending with a one-line trace
 (`ALR-LOITER-EVT-P-001 -> events EVT-P-001 -> frames 1-4,6-9`).
 
+## Analyst layer (M6, `drone_agent/agent/`)
+```
+stored evidence + deterministic alerts  ->  read-only tools  ->  analyst (LLM or template)  ->  citation gate  ->  answer
+```
+**Boundary.** The analyst may explain and summarise stored evidence. It cannot create, suppress or re-rate alerts, change event/entity links or add
+observations: it has no write path (the tools are read-only methods, there is no SQL tool) and alert severity, events and entities are produced only by the
+earlier deterministic stages. **Why LangChain is confined to `agent/llm.py`:** it is only needed to drive a tool-calling chat model; everything else in
+`agent/` (tools, citations, session, template analyst, summary) is plain Python, so the deterministic pipeline and the offline analyst run without the
+`[agent]` extras (`langchain-core`, `langchain-google-genai`; no LangGraph). Tests enforce that no core package imports LangChain and that only `llm.py` does.
+
+| Module | Role |
+|---|---|
+| `tools.py` | The ten read-only tools (below). Bounded JSON views; invalid arguments return `{"error": ...}` |
+| `evidence.py` | View builders and `ToolLimits`; every view lists the citation refs it contains |
+| `citations.py` | Citation parsing and the validator |
+| `summary.py` | `run_facts` (structured facts + limitations) and the deterministic `render_summary` |
+| `offline.py` | Deterministic template analyst (no key, no network) |
+| `session.py` | `AnalystSession`: bounded memory, LLM call, citation gate, one retry, fallback |
+| `llm.py` | The only LangChain code: Gemini chat model + a bounded tool-calling loop |
+| `prompt.py`, `config.py`, `build.py` | System prompt, analyst model config (`ANALYST_MODEL`), lazy construction |
+
+**Tools** (no arbitrary SQL, no generic execution): `search_observations(query, zone, object_type, start, end, limit)`, `list_events`, `get_event`,
+`get_event_evidence`, `list_entities`, `get_entity`, `get_entity_history`, `list_alerts(rule_id, severity, zone, limit)`, `get_alert`, `get_run_summary`.
+**Limits** (`ToolLimits`): observations default 8 / max 15; events, alerts, entities 20; evidence observations per event 15; frame ids listed per event or alert 10;
+descriptions cut to 200 characters (ending in `...`). Results that were cut carry `total`, `returned` and `truncated`; a tool result over 12,000 characters is refused.
+The LLM tool loop is bounded too (6 model rounds, 12 tool calls per answer).
+
+**Citation scheme.** `[frame:10] [obs:obs-10] [event:EVT-V-001] [entity:ENT-V-001] [alert:ALR-REPEAT-ENT-V-001]`: internal references into our own database only.
+**Validation** (after every LLM answer): (1) every cited id must exist in the database; (2) it must have been returned by a tool in this conversation (a real but
+never-retrieved id is rejected); (3) an answer that states facts must cite something, unless it says "Insufficient evidence"; (4) malformed tokens such as
+`[event EVT-1]` are rejected; (5) identity/intent wording ("the same person", "burglar", "criminal", "confirmed to be the same vehicle"; negated forms are allowed) is rejected.
+If validation fails the model gets ONE correction turn naming the problems; if the second answer also fails, the deterministic template answer is returned instead
+(mode `fallback`, with the reasons in `notes`). An unavailable model (auth, quota, network) degrades to the same fallback. Only validated or template text is ever shown.
+
+**Template (offline) analyst.** Pattern-matched, not language understanding: alerts (by rule or id), events, entities, zone summaries, blue-pickup style vehicle questions,
+after-hours people, objects, run summary and a labelled keyword search; everything else gets "Insufficient evidence" plus the list of supported questions. Output is labelled
+"template answer (deterministic, no LLM)". Vehicle wording is always "similar ... coarse attribute match; not confirmed to be the same vehicle".
+
+**Sessions and follow-ups.** `AnalystSession` keeps the last 6 question/answer pairs in memory (no persistence, no multi-user state) and passes them to the LLM. For the template
+analyst a follow-up such as "Where was it seen?" resolves only when the previous answer named exactly ONE entity/alert/event; several candidates leave the pronoun unresolved
+(reply: insufficient evidence) rather than guessing. `ask --interactive` or repeated `--follow-up` runs a session from the CLI.
+
+**Summary.** `run_facts` collects structured, bounded facts (counts, time span, zones, object counts, events with their alerts, entities, and data-driven limitations such as
+"telemetry is simulated" and "N observations are carried forward"). `summarize` prints the deterministic rendering; with `--provider gemini` the model rewrites those same facts as prose
+under the same citation gate. A follow-up ("What objects were observed?") is answered from stored observations/events, never by reprocessing the video.
+
+**Known limitations.** The citation gate proves ids exist and were retrieved, NOT that the sentence around a citation is true: a model can cite a real id for a wrong claim. A live answer used the phrase "vehicle tracking" (the system does coarse attribute grouping, not tracking) and passed the gate; semantic entailment between claims and cited evidence is not verified and is an M7 evaluation target. The
+overclaim check is a narrow phrase list, not semantic. The template analyst is brittle outside its patterns. The analyst model can be wrong, slow or rate-limited; the fallback
+covers outages, not subtle misstatements. Evidence quality is bounded by the vision model (M5B) and by simulated telemetry.
+
 ## Known false positives and false negatives
 False positives: a delivery driver waiting at the gate for 5+ minutes is "loitering"; authorised night staff trigger
 after-hours alerts (there is no allow-list or schedule); two different vehicles that look alike become one entity and can

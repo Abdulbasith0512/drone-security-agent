@@ -3,7 +3,7 @@
 Prototype for the FlytBase AI Engineer assignment: a docked-drone security analyst that turns video and
 telemetry into events, deterministic alerts, searchable history and grounded Q&A.
 
-> **Status: M5B (real-video pipeline with optional Gemini).** Scripted scenarios run end to end through alerts; real video runs through sampling, a frame-change gate and cassette replay. **Gemini is available as an optional real vision model (M5B)**; Q&A and summaries come later.
+> **Status: M6 (analyst Q&A and summary over stored evidence).** Scripted scenarios run end to end through alerts; real video runs through sampling, a frame-change gate and cassette replay. **Gemini is available as an optional real vision model (M5B)**; Evidence-grounded Q&A and run summaries (offline template analyst, optional Gemini via LangChain) are in M6.
 
 Design in one line: `FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING`.
 
@@ -62,6 +62,17 @@ python -m drone_agent ingest-video VIDEO --db output/g2.db --provider cassette -
 Gemini only sees frames the gate accepts; skipped samples are carried forward (still not a new inference). The model reports no confidence, so objects carry an
 UNCALIBRATED placeholder of 0.5. `--model` overrides `GEMINI_MODEL`; there is no fallback model. Telemetry and zones remain simulated. Cassettes and videos are never committed.
 See docs/architecture.md ("Gemini provider").
+
+**Analyst Q&A and summary (M6; works offline with no key):**
+```
+python -m drone_agent ask       --db output/security.db "Was the blue pickup seen more than once?"
+python -m drone_agent ask       --db output/security.db "Why was the repeat-vehicle alert raised?" --follow-up "Where was it seen?"
+python -m drone_agent summarize --db output/security.db --follow-up "What objects were observed?"
+python -m drone_agent ask       --db output/security.db --provider gemini --model MODEL "What happened at the main gate?"   # needs .[agent] and a key
+```
+Answers cite stored evidence as `[event:EVT-V-001]`, `[alert:...]`, `[entity:...]`, `[obs:...]`, `[frame:N]`. The default (`--offline`) is a deterministic template analyst; `--provider gemini`
+uses a LangChain tool-calling loop over read-only tools, and its answer is shown only if every citation exists in the database and was retrieved (one correction retry, then the template fallback).
+The analyst model is `ANALYST_MODEL` (separate from the vision `GEMINI_MODEL`). The LLM only explains: alerts, severities, events and entities come from the deterministic rules. See docs/architecture.md ("Analyst layer").
 
 `ingest` twice into one database is rejected and changes nothing (use a new `--db`); `build-events` and `analyze` replace their derived data (idempotent).
 

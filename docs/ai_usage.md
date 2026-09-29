@@ -266,3 +266,42 @@ the `describe-frame` command, `--provider gemini` / `--cassette-mode` / `--model
 **Validation:** all unit tests mock the SDK (no network). Live checks I ran with my own key: one frame of the synthetic demo video through `describe-frame`, then a record run and a zero-call replay of the
 same video with equivalent observations. The frames are synthetic rectangles, so the descriptions show the plumbing works, not that the model recognises real scenes.
 **Honest notes:** the record run made 5 requests for 4 accepted frames (one retry, cause not recorded in the summary). Latency was several seconds per call. Real footage has not been evaluated yet.
+
+## M6: Analyst Q&A and summary layer
+**Tool:** Claude Code (Claude Sonnet 5.5), from my M6 spec.
+
+**What the AI generated:** the `drone_agent/agent/` package (read-only tools with explicit limits, citation parser/validator, template analyst, session with one retry and fallback, run summary,
+LangChain/Gemini tool-calling adapter, system prompt, analyst config), the `ask` and `summarize` commands, four small read-only store helpers (counts, span, per-zone/source counts) and 83 offline tests (456 in total), plus small call metrics (model, rounds, tool calls, correction attempts, fallback, latency) reported outside the answer text.
+
+**Design decisions the AI made (please review)**
+- LangChain is used only for the chat-model tool-calling loop in one file; a hand-written bounded loop replaces an agent framework, so there is no LangGraph and the offline path needs no extras.
+- Validation is stricter than "ids exist": a cited id must also have been returned by a tool in this conversation, and an answer with facts but no citation (and no "Insufficient evidence") is rejected.
+  After one correction retry the deterministic answer replaces the model's text; the same fallback covers API outages.
+- Pronoun follow-ups for the template analyst resolve only when the previous answer had a single subject; after a summary ("it" is ambiguous) they return "insufficient evidence" instead of guessing.
+- `--offline` is the default provider so no command spends API quota unless `--provider gemini` is given.
+
+**Problems found and fixed during validation (honest log)**
+- The first template "no such alert" reply failed my own citation gate (a factual claim without citations); it now says "Insufficient evidence".
+- I had guessed the restricted-zone rule id as `restricted_zone`; the real id is `restricted_zone_entry`, so that question returned "no alert" until a test caught it.
+- Citing every id in an answer to resolve "it" picked the last entity after a summary (wrong); replaced by the single-subject rule above.
+- A scaffold test that greps core sources for the word "langchain" caught my CLI wiring; the lazy construction moved into `agent/build.py`.
+- Mutation checks: I broke the code 9 ways (skip the existence check, skip the missing-citation check, skip the retrieved-set check, allow a third attempt, accept invalid answers, remove the observation cap,
+  drop the coarse-vehicle wording, resolve pronouns with several candidates, remove the tool-call cap). All are caught by the tests (one mutation first did not apply because the string differed; redone by hand).
+
+**How it was tested:** all offline. The analyst LLM boundary is faked (a scripted analyst for the session; a fake chat model that returns real LangChain messages for the adapter). Covered: each tool, filters, bounds and
+truncation flags, read-only behaviour, prompt constraints, citation extraction/rejection of nonexistent, unretrieved, malformed and missing citations, one retry then fallback, no identity or intent wording in template output,
+coarse vehicle wording, sessions and follow-ups, summaries, the import boundary (source scan plus a subprocess with LangChain blocked), and the five `security_events` questions.
+**Known limitation:** the citation gate checks that ids are real and retrieved, not that the prose around them is true. Real model behaviour will be assessed only after the first live call.
+
+**Live analyst validation (Gemini, `gemini-3.6-flash`, three approved runs of one question; a tiny sample, no reliability statistics implied)**
+- Grounded LLM answers with verified citations were produced. The first run was accepted; its call metrics were not yet instrumented.
+- One run hit a transient `ReadTimeout` at the configured 60-second boundary. The system withheld the unavailable LLM path and returned the deterministic, evidence-backed fallback, labelled as such,
+  with the reason in the notes. I do not treat this as evidence of a systematic Gemini problem, and the timeout value was left unchanged.
+- A subsequent run succeeded in 13.02 s: 3 model rounds, 4 tool calls (4 unique tools: `get_entity_history`, `list_entities`, `list_events`, `search_observations`), 0 correction attempts, fallback = no, citations verified.
+- Removing the unsupported `temperature` argument from the LangChain chat model made the "fixed sampling defaults" warnings disappear (a test checks that it is not passed).
+
+**Semantic-grounding limitation (an explicit M7 evaluation target)**
+Citation validation verifies that cited ids exist, that they were actually retrieved by a tool, that required citations are present, and that selected identity/intent wording is rejected.
+It does NOT prove semantic entailment between each natural-language claim and the evidence it cites. Observed live example: the model wrote "vehicle tracking", although the system does not perform
+persistent vehicle tracking; it performs coarse attribute-based vehicle grouping. Wording inside a list item can also be less carefully qualified than the surrounding uncertainty statement
+(e.g. "a blue pickup" without "similar"). I deliberately did not add a one-off phrase ban for "vehicle tracking": that would be brittle and would hide the general issue. M7 should measure it.

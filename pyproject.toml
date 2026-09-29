@@ -18,7 +18,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-agent = ["langchain-core>=0.3"]    # analyst Q&A layer only (drone_agent/agent)
+agent = [                          # analyst Q&A layer only (drone_agent/agent/llm.py)
+    "langchain-core>=1.0",
+    "langchain-google-genai>=4.0",
+]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [tool.setuptools.packages.find]

@@ -276,6 +276,48 @@ class Store(DerivedMixin):
         rows = self._conn.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()
         return [row["detail"] for row in rows]
 
+    def count_matching_observations(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        zone: Zone | None = None,
+        object_type: ObjectType | None = None,
+        text: str | None = None,
+    ) -> int:
+        """How many observations `query_observations` would return without a limit."""
+        sql, params = self._build_query(start, end, zone, object_type, text, None)
+        return self._conn.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
+
+    def observation_span(self) -> tuple[datetime, datetime] | None:
+        """Timestamps of the earliest and latest observation (None if there are none)."""
+        first = self._conn.execute(
+            "SELECT timestamp FROM observations ORDER BY ts_utc, frame_id LIMIT 1"
+        ).fetchone()
+        if first is None:
+            return None
+        last = self._conn.execute(
+            "SELECT timestamp FROM observations ORDER BY ts_utc DESC, frame_id DESC LIMIT 1"
+        ).fetchone()
+        return datetime.fromisoformat(first[0]), datetime.fromisoformat(last[0])
+
+    def observation_counts_by(self, column: str) -> dict[str, int]:
+        """Observation counts per `zone` or per `source` (a fixed whitelist, never user text)."""
+        if column not in ("zone", "source"):
+            raise ValueError("column must be 'zone' or 'source'")
+        rows = self._conn.execute(
+            f"SELECT {column} AS k, COUNT(*) AS n FROM observations GROUP BY {column} ORDER BY k"
+        )
+        return {r["k"]: r["n"] for r in rows}
+
+    def detected_object_counts(self) -> dict[str, int]:
+        """Number of detected objects per object type."""
+        rows = self._conn.execute(
+            "SELECT object_type AS k, COUNT(*) AS n FROM detected_objects GROUP BY object_type"
+            " ORDER BY k"
+        )
+        return {r["k"]: r["n"] for r in rows}
+
     def count_observations(self) -> int:
         return self._count("observations")
 

@@ -1,0 +1,191 @@
+# Night patrol crossing midnight (23:40 -> 00:30 IST). Closed hours are assumed to be 22:00-06:00.
+# M1 only produces observations; later milestones derive the expected outcomes below.
+#
+# Ground truth for later tests (frame ids; frames are 60 s apart):
+#   LOITERING        person A (dark jacket) at main_gate, frames 1-9 = 23:41:00-23:49:00 (8 min).
+#                    Frame 5 has a missed detection (flicker): a 2-minute gap between sightings.
+#   AFTER-HOURS      person A (frames 1-9) and person B (frames 19-20, warehouse, 00:11-00:12)
+#                    are present during closed hours. B is brief: NOT loitering.
+#   REPEAT VEHICLE   blue pickup: parking_area frames 10-11 (23:51-23:52), driveway frames 13-14
+#                    (23:56-23:57, described "dark blue"), main_gate frames 16-17 (00:05-00:06).
+#                    Three sightings, each separated by >= 4 minutes. Frame 26 (white sedan) is a
+#                    different vehicle and must NOT match.
+#   RESTRICTED ZONE  person B (dark hoodie) in restricted_zone, frames 22-24 = 00:16-00:18.
+# Frame 18 (00:07:00) falls in a simulated telemetry dropout, so its telemetry is stale.
+# All coordinates are synthetic.
+name: security_events
+description: Night patrol with a loiterer at the gate, a repeat blue pickup, and a restricted-zone intruder.
+start: "2026-09-29T23:40:00+05:30"
+telemetry:
+  seed: 7
+  sample_interval_s: 10
+  stale_after_s: 30
+  battery_start_percent: 96
+  battery_drain_percent_per_min: 0.4
+  patrol:
+    - {zone: main_gate, duration_s: 600}       # 23:40-23:50
+    - {zone: parking_area, duration_s: 300}    # 23:50-23:55
+    - {zone: driveway, duration_s: 300}        # 23:55-00:00
+    - {zone: main_gate, duration_s: 600}       # 00:00-00:10
+    - {zone: warehouse, duration_s: 300}       # 00:10-00:15
+    - {zone: restricted_zone, duration_s: 300} # 00:15-00:20
+    - {zone: parking_area, duration_s: 300}    # 00:20-00:25
+    - {zone: driveway, duration_s: 300}        # 00:25-00:30
+  dropouts:
+    - {start_offset_s: 1570, end_offset_s: 1690}   # link loss around 00:06:10-00:08:10
+frames:
+  # --- person A loiters at the main gate ---
+  - frame_id: 1
+    timestamp_offset: 60
+    zone: main_gate
+    description: "Person standing near the main gate"
+    objects:
+      - {type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.94}
+  - frame_id: 2
+    timestamp_offset: 120
+    zone: main_gate
+    description: "Person in dark jacket still standing at the main gate"
+    objects:
+      - {type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.93}
+  - frame_id: 3
+    timestamp_offset: 180
+    zone: main_gate
+    description: "Person in dark jacket pacing back and forth by the gate"
+    objects:
+      - {type: person, activity: pacing, attributes: {clothing: dark jacket}, confidence: 0.91}
+  - frame_id: 4
+    timestamp_offset: 240
+    zone: main_gate
+    description: "Person in dark jacket standing at the gate, looking at the property"
+    objects:
+      - {type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.92}
+  - frame_id: 5
+    timestamp_offset: 300
+    zone: main_gate
+    description: "Main gate area, no visible activity (detection missed)"
+  - frame_id: 6
+    timestamp_offset: 360
+    zone: main_gate
+    description: "Person in dark jacket standing at the main gate"
+    objects:
+      - {type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.9}
+  - frame_id: 7
+    timestamp_offset: 420
+    zone: main_gate
+    description: "Person in dark jacket pacing near the gate"
+    objects:
+      - {type: person, activity: pacing, attributes: {clothing: dark jacket}, confidence: 0.92}
+  - frame_id: 8
+    timestamp_offset: 480
+    zone: main_gate
+    description: "Person in dark jacket standing at the main gate"
+    objects:
+      - {type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.94}
+  - frame_id: 9
+    timestamp_offset: 540
+    zone: main_gate
+    description: "Person in dark jacket standing at the main gate"
+    objects:
+      - {type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.93}
+  # --- blue pickup, sighting 1 (parking area) ---
+  - frame_id: 10
+    timestamp_offset: 660
+    zone: parking_area
+    description: "Blue pickup truck parked in the parking area"
+    objects:
+      - {type: vehicle, activity: parked, attributes: {color: blue, body_type: pickup}, confidence: 0.95}
+  - frame_id: 11
+    timestamp_offset: 720
+    zone: parking_area
+    description: "Blue pickup truck still parked in the parking area"
+    objects:
+      - {type: vehicle, activity: parked, attributes: {color: blue, body_type: pickup}, confidence: 0.94}
+  - frame_id: 12
+    timestamp_offset: 780
+    zone: parking_area
+    description: "Parking area empty"
+  # --- blue pickup, sighting 2 (driveway, described as dark blue) ---
+  - frame_id: 13
+    timestamp_offset: 960
+    zone: driveway
+    description: "Dark blue pickup truck driving along the driveway"
+    objects:
+      - {type: vehicle, activity: driving, attributes: {color: dark blue, body_type: pickup}, confidence: 0.88}
+  - frame_id: 14
+    timestamp_offset: 1020
+    zone: driveway
+    description: "Dark blue pickup truck moving along the driveway"
+    objects:
+      - {type: vehicle, activity: driving, attributes: {color: dark blue, body_type: pickup}, confidence: 0.87}
+  - frame_id: 15
+    timestamp_offset: 1080
+    zone: driveway
+    description: "Driveway clear"
+  # --- blue pickup, sighting 3 (main gate, after midnight) ---
+  - frame_id: 16
+    timestamp_offset: 1500
+    zone: main_gate
+    description: "Blue pickup truck stopped at the main gate"
+    objects:
+      - {type: vehicle, activity: stopped, attributes: {color: blue, body_type: pickup}, confidence: 0.93}
+  - frame_id: 17
+    timestamp_offset: 1560
+    zone: main_gate
+    description: "Blue pickup truck at the main gate, engine running"
+    objects:
+      - {type: vehicle, activity: stopped, attributes: {color: blue, body_type: pickup}, confidence: 0.92}
+  - frame_id: 18
+    timestamp_offset: 1620
+    zone: main_gate
+    description: "Main gate clear (telemetry link lost)"
+  # --- person B: brief after-hours presence at the warehouse ---
+  - frame_id: 19
+    timestamp_offset: 1860
+    zone: warehouse
+    description: "Person in dark hoodie walking near the warehouse"
+    objects:
+      - {type: person, activity: walking, attributes: {clothing: dark hoodie}, confidence: 0.86}
+  - frame_id: 20
+    timestamp_offset: 1920
+    zone: warehouse
+    description: "Person in dark hoodie walking along the warehouse wall"
+    objects:
+      - {type: person, activity: walking, attributes: {clothing: dark hoodie}, confidence: 0.85}
+  - frame_id: 21
+    timestamp_offset: 1980
+    zone: warehouse
+    description: "Warehouse exterior clear"
+  # --- person B enters the restricted zone ---
+  - frame_id: 22
+    timestamp_offset: 2160
+    zone: restricted_zone
+    description: "Person in dark hoodie walking inside the restricted zone"
+    objects:
+      - {type: person, activity: walking, attributes: {clothing: dark hoodie}, confidence: 0.9}
+  - frame_id: 23
+    timestamp_offset: 2220
+    zone: restricted_zone
+    description: "Person in dark hoodie walking inside the restricted zone"
+    objects:
+      - {type: person, activity: walking, attributes: {clothing: dark hoodie}, confidence: 0.89}
+  - frame_id: 24
+    timestamp_offset: 2280
+    zone: restricted_zone
+    description: "Person in dark hoodie standing inside the restricted zone"
+    objects:
+      - {type: person, activity: standing, attributes: {clothing: dark hoodie}, confidence: 0.88}
+  - frame_id: 25
+    timestamp_offset: 2340
+    zone: restricted_zone
+    description: "Restricted zone clear"
+  # --- distractor: a different vehicle ---
+  - frame_id: 26
+    timestamp_offset: 2460
+    zone: parking_area
+    description: "White sedan parked in the parking area"
+    objects:
+      - {type: vehicle, activity: parked, attributes: {color: white, body_type: sedan}, confidence: 0.94}
+  - frame_id: 27
+    timestamp_offset: 2760
+    zone: driveway
+    description: "Driveway clear"

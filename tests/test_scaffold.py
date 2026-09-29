@@ -1,6 +1,7 @@
 """M0 smoke test: package imports and the core stays free of LangChain."""
 
 import importlib
+import pathlib
 import pkgutil
 
 import drone_agent
@@ -17,4 +18,4 @@ def test_core_does_not_import_langchain():
         m = importlib.import_module(mod.name)
         src = getattr(m, "__file__", "") or ""
         if src.endswith(".py"):
-            assert "langchain" not in open(src, encoding="utf-8").read().lower()
+            assert "langchain" not in pathlib.Path(src).read_text(encoding="utf-8").lower()

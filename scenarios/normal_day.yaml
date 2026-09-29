@@ -1,0 +1,83 @@
+# Baseline: ordinary daytime activity. Later milestones must raise NO alerts on this scenario.
+#   - daytime (10:00-10:20 IST), no restricted_zone activity
+#   - a courier is at the main gate for at most 2 minutes (well under any loitering threshold)
+#   - two different vehicles, each seen once (no repeat vehicle)
+# All coordinates are synthetic. Frames are 60 s apart.
+name: normal_day
+description: Ordinary daytime patrol with a courier delivery and a staff member; no threats.
+start: "2026-09-29T10:00:00+05:30"
+telemetry:
+  seed: 1
+  sample_interval_s: 10
+  stale_after_s: 30
+  battery_start_percent: 98
+  battery_drain_percent_per_min: 0.4
+  patrol:
+    - {zone: main_gate, duration_s: 300}      # 10:00-10:05
+    - {zone: parking_area, duration_s: 300}   # 10:05-10:10
+    - {zone: warehouse, duration_s: 300}      # 10:10-10:15
+    - {zone: driveway, duration_s: 300}       # 10:15-10:20
+frames:
+  - frame_id: 1
+    timestamp_offset: 60
+    zone: main_gate
+    description: "White delivery van stopped outside the main gate"
+    objects:
+      - {type: vehicle, activity: stopped, attributes: {color: white, body_type: van}, confidence: 0.96}
+  - frame_id: 2
+    timestamp_offset: 120
+    zone: main_gate
+    description: "Courier in hi-vis vest standing beside the delivery van at the gate"
+    objects:
+      - {type: vehicle, activity: stopped, attributes: {color: white, body_type: van}, confidence: 0.95}
+      - {type: person, activity: standing, attributes: {clothing: hi-vis vest}, confidence: 0.92}
+  - frame_id: 3
+    timestamp_offset: 180
+    zone: main_gate
+    description: "Courier walking back to the delivery van"
+    objects:
+      - {type: vehicle, activity: stopped, attributes: {color: white, body_type: van}, confidence: 0.94}
+      - {type: person, activity: walking, attributes: {clothing: hi-vis vest}, confidence: 0.9}
+  - frame_id: 4
+    timestamp_offset: 240
+    zone: main_gate
+    description: "Main gate clear, no vehicles or people"
+  - frame_id: 5
+    timestamp_offset: 360
+    zone: parking_area
+    description: "Grey hatchback parked in the staff parking area"
+    objects:
+      - {type: vehicle, activity: parked, attributes: {color: grey, body_type: hatchback}, confidence: 0.93}
+  - frame_id: 6
+    timestamp_offset: 420
+    zone: parking_area
+    description: "Staff member in navy shirt walking past the parked hatchback"
+    objects:
+      - {type: vehicle, activity: parked, attributes: {color: grey, body_type: hatchback}, confidence: 0.94}
+      - {type: person, activity: walking, attributes: {clothing: navy shirt}, confidence: 0.91}
+  - frame_id: 7
+    timestamp_offset: 480
+    zone: parking_area
+    description: "Grey hatchback still parked, nobody around"
+    objects:
+      - {type: vehicle, activity: parked, attributes: {color: grey, body_type: hatchback}, confidence: 0.95}
+  - frame_id: 8
+    timestamp_offset: 660
+    zone: warehouse
+    description: "Staff member in navy shirt standing at the warehouse door"
+    objects:
+      - {type: person, activity: standing, attributes: {clothing: navy shirt}, confidence: 0.9}
+  - frame_id: 9
+    timestamp_offset: 720
+    zone: warehouse
+    description: "Staff member in navy shirt walking into the warehouse"
+    objects:
+      - {type: person, activity: walking, attributes: {clothing: navy shirt}, confidence: 0.89}
+  - frame_id: 10
+    timestamp_offset: 780
+    zone: warehouse
+    description: "Warehouse exterior clear"
+  - frame_id: 11
+    timestamp_offset: 960
+    zone: driveway
+    description: "Driveway clear, no vehicles or people"

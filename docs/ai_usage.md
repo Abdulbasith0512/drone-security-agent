@@ -43,3 +43,35 @@ VLM providers, YOLO/tracking, Docker/CI, LangGraph, face recognition, multi-dron
 
 **Also in M0:** Claude Code generated the `.gitignore`, package scaffold, `pyproject.toml` and these docs.
 Validated by `git check-ignore` on the PDF, `git ls-files`, and a passing scaffold smoke test.
+
+## M1: Domain models, simulated telemetry, ScriptedProvider
+**Tool:** Claude Code (Claude Sonnet 5.5). I gave a detailed M1 spec; the AI implemented it.
+
+**What the AI generated**
+- Pydantic v2 models (Telemetry, TelemetryAssociation, DetectedObject, Observation, minimal Event/Alert
+  schemas), `SimulationClock`, the telemetry simulator, `TelemetrySynchronizer`, the `VisionProvider`
+  protocol, `ScriptedProvider`, scenario loader, Rich CLI (`simulate`), two YAML scenarios and 60 tests.
+
+**Design decisions (AI proposed, I approved by approving the plan and milestone spec)**
+- Models are frozen and reject unknown fields; timestamps use `AwareDatetime`; confidence is 0..1 with NaN rejected.
+- The clock is stateless (`start + offset`), so midnight crossing is plain datetime arithmetic and never reads the wall clock.
+- Nearest-prior sync uses `bisect`; age equal to the threshold is fresh, strictly greater is stale;
+  a frame before the first sample has no association.
+- The scenario validator cross-checks that each frame's zone equals the drone's patrol zone at that
+  offset. This encodes the assumption "object zone = drone zone" and catches scenario typos.
+- Telemetry randomness is drawn for every sample before dropouts are applied, so a dropout never changes other samples.
+- `security_events.yaml` documents its ground truth in a header comment (loiter 8 min with a missed
+  detection, repeat blue pickup in three sightings incl. a "dark blue" variant, brief after-hours person,
+  restricted-zone entry, a white sedan distractor, one stale-telemetry frame).
+
+**Assumptions:** closed hours are 22:00-06:00 (used by M4, not enforced in M1); coordinates are synthetic
+values near (0, 0); attribute values must be strings (a YAML number such as `plate: 1234` is rejected on purpose).
+
+**Problems found and fixed during validation (honest log)**
+- 12 tests errored with `PermissionError` on the system temp dir (`pytest-of-Admin`). I set
+  `--basetemp=.pytest_tmp` in `pyproject.toml` and gitignored it.
+- Ruff's default rule set flagged 17 style issues. I auto-fixed import order, then pinned an explicit
+  rule selection (E, F, I, UP, B, SIM) rather than chase stylistic rules, and fixed the 4 real findings by hand.
+
+**Validation:** `pytest -v` (60 passed), `ruff check .` (clean), `ruff format --check .` (clean), and a manual
+run of `python -m drone_agent simulate scenarios/security_events.yaml`. Tests need no network or API key.

@@ -208,3 +208,45 @@ validation (13 invalid files), engine determinism/dedup/overlap, database round 
 chain to frames, foreign-key and CHECK enforcement, atomic failed replace, idempotent re-analysis, config-change replacement,
 alert discard on rebuild, `security_events` and `normal_day` end to end, CLI tests, and a raw-SQL integrity inspection
 (`integrity_check` ok, `foreign_key_check` empty, every alert has events and evidence frames, `triggered_at` inside its span).
+
+## M5A: Real video ingestion, frame gate, provider contract and cassette replay
+**Tool:** Claude Code (Claude Sonnet 5.5), from my detailed M5A spec. Per my instruction no real VLM is chosen or implemented, and this
+milestone was committed as its own checkpoint before any real-provider work.
+
+**What the AI generated:** the `video/` package (validated source, deterministic sampler, frame-change gate, simulated timeline, ingest
+orchestration, synthetic test video), the `vision/` contract (`FrameDescriber`, strict `ProviderOutput` schema, `DescriberProvider`) and the
+cassette (file format, replay/record/live modes), the `ingest-video` and `make-demo-video` commands, a generalised `ingest_observations`, and 91 new tests (335 total).
+
+**Design decisions the AI made (please review)**
+- **Carry-forward of gate-skipped frames (default) is an addition beyond my spec.** My spec only said the gate avoids sending frames to a VLM.
+  The AI noticed that dropped frames leave long gaps that the M3 aggregator turns into split events (a still person becomes one
+  zero-duration event; there is a test showing it), so skipped frames are represented by a labelled copy of the last accepted observation
+  (`source = "<provider>+carried"`) and the gate resets on zone changes. `--skipped drop` gives the literal behaviour.
+  **Decision (mine, after review): carry-forward stays the default; `--skipped drop` stays as the explicit alternative.** A carried
+  observation is temporal propagation of the last accepted model observation, NOT a new model inference, and is documented and labelled as such.
+- **A real provider implements a smaller interface** (`describe(frame) -> ProviderOutput`), not `analyze() -> Observation`. The pipeline, not the
+  model, assigns zone, time and ids. `VisionProvider` and `ScriptedProvider` are unchanged; `FrameInput` gained optional video fields.
+- **The provider output schema is strict** (unknown keys and wrong types are errors). Missing confidence is an error unless an explicit
+  `default_confidence` is configured; nothing is invented silently. This may be brittle against a real model and could need a repair step in M5B.
+- **Cassettes are keyed by video file hash + frame index**, not pixels, so they survive different OpenCV builds; a pixel-level content hash is recorded
+  and only reported on mismatch. The cassette in `output/` is canned (written by the tool), labelled as such, not a model's output.
+- **The gate default (threshold 6.0 on a 64x36 greyscale copy) is an uncalibrated starting point.** `frame_id` = source frame index, so one database holds one video.
+  Frames are decoded sequentially (simple, codec-safe) rather than by seeking. `numpy` was added as an explicit dependency.
+
+**Problems found and fixed during validation (honest log)**
+- The first synthetic scenes were too subtle: scene changes scored 1.7 and 3.2 against the default threshold of 6.0, so the gate would have skipped real
+  changes. I did NOT tune the default to a toy video; I made the scenes large and high-contrast (scores now 13-26 versus exactly 0.0 for identical frames).
+- Three of my first-draft tests assumed wrong behaviour: a "cassette miss" test never missed because the gate correctly skipped the extra samples (it now uses `--no-gate`
+  for the miss and checks the gated run separately), and I miscounted the simulated telemetry samples (3, not 22).
+- Mutation testing: I broke the code 8 ways (gate `>` versus `>=`, gate comparing with the last seen frame, truncating instead of rounding frame indexes, carrying
+  across zone changes, a cassette miss silently returning text, silently inventing confidence, ignoring extra provider keys, skipping the first-frame decode check).
+  One mutation (first-frame decode) was NOT caught at first, because my corrupt-file tests fail earlier at "cannot open"; I added stubbed-OpenCV tests
+  (bad FPS, no frames, undecodable first frame) and re-ran it. Another mutation did not apply because of a shell multi-line `sed`; I redid it with a script. All 8 are now caught.
+- A long mutation loop exceeded the tool timeout and ran in the background; I did not edit code while it ran and confirmed the restored files match before continuing.
+
+**How it was tested:** offline and deterministic (the video is generated in the tests, never committed): metadata, missing/empty/garbage/truncated files,
+stubbed unusable containers, sampling plans (integer, 12.5 and 29.97 fps, short video, end of video, tiny intervals, `max_samples`), timestamps, decode failures and early stream end,
+gate behaviour (first frame, identical, changed, drift, boundary, disabled, reset, scene changes on the synthetic video), timeline mapping including midnight, provider
+output validation (13 malformed shapes), observation construction, cassette round trip/determinism/safe contents/invalid files, replay/miss/mismatch, record and live modes
+with a FAKE describer (no real model), stable frame identity, video ingest into SQLite, unchanged events/entities/alerts from video observations, CLI success and failure paths (a failure
+leaves no database), and an M1-M4 regression check (7 events, 2 entities, 1 multi-appearance entity, 6 alerts; `normal_day` 0 alerts).

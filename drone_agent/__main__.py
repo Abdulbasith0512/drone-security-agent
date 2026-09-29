@@ -4,13 +4,14 @@ import argparse
 import sys
 from collections.abc import Sequence
 from datetime import datetime
+from pathlib import Path
 
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from drone_agent.ingest import ingest_result
+from drone_agent.ingest import ingest_observations, ingest_result
 from drone_agent.models import (
     DetectedObject,
     Entity,
@@ -26,6 +27,26 @@ from drone_agent.rules import analyze, load_rules_config
 from drone_agent.scenario import ScenarioError, load_scenario
 from drone_agent.simulate import run_scenario
 from drone_agent.store import DuplicateRecordError, Fts5UnavailableError, Store, StoreError
+from drone_agent.video import (
+    GateConfig,
+    SamplingConfig,
+    SkippedPolicy,
+    TimelineError,
+    VideoError,
+    VideoIngestConfig,
+    VideoSource,
+    load_timeline,
+    run_video_ingest,
+    single_zone_timeline,
+)
+from drone_agent.vision import (
+    Cassette,
+    CassetteDescriber,
+    CassetteError,
+    CassetteMode,
+    DescriberProvider,
+    ProviderOutputError,
+)
 
 
 # ---- formatting helpers ---------------------------------------------------------------------
@@ -507,6 +528,145 @@ def alerts_command(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+# ---- M5A commands: real video -----------------------------------------------------------------
+def _parse_size(value: str) -> tuple[int, int]:
+    try:
+        width, height = value.lower().split("x")
+        return int(width), int(height)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"'{value}' must look like 64x36") from exc
+
+
+def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
+    describer: CassetteDescriber | None = None
+    try:
+        source = VideoSource(args.video)
+        meta = source.metadata
+        if args.timeline:
+            timeline = load_timeline(args.timeline)
+        else:
+            timeline = single_zone_timeline(args.start, Zone(args.zone), meta.duration_seconds)
+        if args.provider == "cassette":
+            if not args.cassette:
+                raise CassetteError("--provider cassette needs --cassette FILE")
+            describer = CassetteDescriber(Cassette.load(args.cassette), CassetteMode.REPLAY)
+            describer.check_video(meta.sha256)
+            provider = DescriberProvider(describer)
+        else:  # argparse restricts the choices; a real VLM provider arrives in M5B
+            raise CassetteError(f"unknown provider {args.provider}")
+        width, height = args.gate_resize
+        config = VideoIngestConfig(
+            sampling=SamplingConfig(every_seconds=args.sample_every),
+            gate=GateConfig(
+                enabled=not args.no_gate,
+                resize_width=width,
+                resize_height=height,
+                threshold=args.gate_threshold,
+            ),
+            skipped=SkippedPolicy(args.skipped),
+        )
+        result = run_video_ingest(source, provider, timeline, config)
+    except (VideoError, TimelineError, CassetteError, ProviderOutputError, ValueError) as exc:
+        _error(console, str(exc))
+        return 2
+
+    try:
+        with Store.open(args.db) as store:
+            _note_migration(console, store)
+            summary = ingest_observations(
+                store, meta.source_name, result.telemetry, result.observations
+            )
+    except DuplicateRecordError as exc:
+        _error(
+            console,
+            f"{exc}\nThe database already holds these records. Ingestion is atomic, so nothing "
+            "was changed. Use a new --db path (or delete the file) to ingest again.",
+        )
+        return 1
+    except StoreError as exc:
+        _error(console, str(exc))
+        return 1
+
+    rep = result.sampling
+    table = Table(title="Video ingest summary", show_header=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row(
+        "Video", _cell(f"{meta.source_name} ({meta.width}x{meta.height}, {meta.fps:g} fps)")
+    )
+    table.add_row("Video duration", _cell(f"{meta.duration_seconds:.2f}s"))
+    table.add_row("Original frames", _cell(rep.original_frames))
+    table.add_row(
+        "Sample candidates",
+        _cell(
+            f"{rep.planned} every {args.sample_every:g}s (decoded {rep.decoded}, "
+            f"failed {rep.failed}, beyond end {rep.beyond_end})"
+        ),
+    )
+    gate_note = "gate disabled" if args.no_gate else f"threshold {args.gate_threshold:g}"
+    table.add_row("Frame gate accepted", _cell(f"{result.gate_accepted} ({gate_note})"))
+    table.add_row(
+        "Frame gate skipped (similar)",
+        _cell(f"{result.gate_skipped} (policy: {args.skipped}; carried {result.carried})"),
+    )
+    replays = f", cassette replays {describer.replayed}" if describer else ""
+    table.add_row("Provider calls", _cell(f"{result.provider_calls}{replays}"))
+    if describer and describer.content_mismatches:
+        table.add_row(
+            "Cassette content mismatches",
+            _cell(f"{len(describer.content_mismatches)} (decoded pixels differ from recording)"),
+        )
+    table.add_row("Observations written", _cell(summary.observations))
+    table.add_row("Objects written", _cell(summary.objects))
+    table.add_row(
+        "SIMULATED telemetry samples",
+        _cell(
+            f"{summary.telemetry_samples} (not from the video; start {timeline.start.isoformat()})"
+        ),
+    )
+    table.add_row("Stale telemetry associations", _cell(summary.stale_associations))
+    table.add_row("Database", _cell(args.db))
+    console.print(table)
+
+    if args.verbose:
+        detail = Table(title="Sample candidates")
+        for col in ("Frame", "Offset", "Zone", "Gate score", "Gate", "Action"):
+            detail.add_column(col)
+        for c in result.candidates:
+            score = "-" if c.gate_score is None else f"{c.gate_score:.2f}"
+            detail.add_row(
+                _cell(c.frame_index),
+                _cell(f"{c.offset_seconds:.2f}s"),
+                _cell(c.zone),
+                _cell(score),
+                _cell(c.gate_reason),
+                _cell(c.action),
+            )
+        console.print(detail)
+    return 0
+
+
+def make_demo_video_command(out_dir: str, console: Console) -> int:
+    from drone_agent.video.synthetic import (
+        DEMO_PROVIDER_LABEL,
+        build_demo_cassette,
+        write_demo_video,
+    )
+
+    try:
+        video = write_demo_video(Path(out_dir) / "demo.avi")
+        cassette = build_demo_cassette(video)
+    except VideoError as exc:
+        _error(console, str(exc))
+        return 2
+    cassette_path = Path(out_dir) / "demo.cassette.json"
+    cassette.save(cassette_path)
+    console.print(_cell(f"synthetic video: {video}"))
+    console.print(_cell(f"demo cassette:   {cassette_path} ({len(cassette)} entries)"))
+    console.print(_cell(f"note: descriptions come from {DEMO_PROVIDER_LABEL}"))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, console: Console | None = None) -> int:
     parser = argparse.ArgumentParser(prog="drone_agent")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -558,6 +718,43 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
     alr.add_argument("--zone", choices=[z.value for z in Zone])
     alr.add_argument("--show", metavar="ALERT_ID", help="show reason, facts and evidence")
 
+    vid = sub.add_parser(
+        "ingest-video", help="sample a video, describe frames via a provider, store observations"
+    )
+    vid.add_argument("video", help="path to a local video file")
+    vid.add_argument("--db", required=True, help="SQLite database path (created if missing)")
+    vid.add_argument("--provider", choices=["cassette"], default="cassette")
+    vid.add_argument("--cassette", help="cassette JSON with recorded provider responses (replay)")
+    vid.add_argument("--sample-every", type=float, default=2.0, metavar="SECONDS")
+    vid.add_argument("--no-gate", action="store_true", help="send every sampled frame")
+    vid.add_argument("--gate-threshold", type=float, default=6.0, help="mean abs pixel diff, 0-255")
+    vid.add_argument("--gate-resize", type=_parse_size, default=(64, 36), metavar="WxH")
+    vid.add_argument(
+        "--skipped",
+        choices=["carry", "drop"],
+        default="carry",
+        help="gate-skipped frames: carry the last observation forward, or drop them",
+    )
+    vid.add_argument("--timeline", help="YAML with a SIMULATED start time and patrol (zones)")
+    vid.add_argument(
+        "--start",
+        type=_parse_time,
+        default="2026-09-29T23:40:00+05:30",
+        help="SIMULATED wall-clock time of video start (used when no --timeline)",
+    )
+    vid.add_argument(
+        "--zone",
+        choices=[z.value for z in Zone],
+        default=Zone.MAIN_GATE.value,
+        help="SIMULATED zone for the whole video (used when no --timeline)",
+    )
+    vid.add_argument("--verbose", action="store_true", help="list every sample candidate")
+
+    demo = sub.add_parser(
+        "make-demo-video", help="write a tiny synthetic test video and a matching demo cassette"
+    )
+    demo.add_argument("--out-dir", default="output/demo")
+
     args = parser.parse_args(argv)
     console = console or Console()
     if args.command == "simulate":
@@ -574,7 +771,11 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
         return entities_command(args, console)
     if args.command == "analyze":
         return analyze_command(args.db, args.rules, console)
-    return alerts_command(args, console)
+    if args.command == "alerts":
+        return alerts_command(args, console)
+    if args.command == "ingest-video":
+        return ingest_video_command(args, console)
+    return make_demo_video_command(args.out_dir, console)
 
 
 if __name__ == "__main__":

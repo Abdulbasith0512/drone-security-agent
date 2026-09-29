@@ -40,6 +40,7 @@ Rules decide; the LLM explains and answers from tool output only.
 drone_agent/
   models/ telemetry/ vision/ store/ pipeline/ rules/ agent/   # agent/ is the only place langchain is imported
 config/events.yaml  config/security_rules.yaml            # M3 event thresholds, M4 rule config
+  (video/ and vision/ hold the M5A real-video pipeline and provider contract)
 scenarios/  tests/  bench/  docs/
 ```
 Dependency direction: `agent` -> `store`; `rules` -> `models`; core packages never import `agent`.
@@ -365,3 +366,161 @@ events that may each stay below the loitering threshold; a single sighting has d
 an after-hours alert by default (add `vehicle` to `object_types`, at the cost of noise); a vehicle whose colour the VLM
 reports inconsistently splits into two entities and may miss the repeat threshold; nothing is seen while the drone is
 elsewhere. Thresholds are hand-set on two scripted scenarios and are not validated on real footage.
+
+---
+
+# Real video ingestion (M5A: provider-neutral pipeline + cassette replay)
+
+Implemented in `drone_agent/video/` (source, sampling, gate, timeline, ingest, synthetic) and `drone_agent/vision/`
+(`base.py`, `contract.py`, `cassette.py`). **No real vision model is implemented yet**; that is M5B. This milestone builds
+everything around it so that adding one is a small, isolated step.
+
+```
+video file ─► VideoSource (validated) ─► sampling (every N s) ─► frame-change gate ─► VisionProvider ─► Observation
+                                                                        │ skipped                         ▲
+                                                                        └─► carry last observation ───────┤
+SIMULATED timeline (start time + patrol zones) ─► simulated telemetry ─► nearest-prior sync ─────────────┘
+                                                                                                          ▼
+                                             the existing SQLite -> events -> entities -> rules -> alerts pipeline
+```
+
+## Scripted versus real-video ingestion
+| | `ingest <scenario.yaml>` (M1-M4) | `ingest-video <video>` (M5A) |
+|---|---|---|
+| Frames | text lines in YAML | frames decoded from a real video file with OpenCV |
+| Descriptions | scripted | a provider's output (today: a cassette replay) |
+| Zone / time / telemetry | from the scenario | from a SIMULATED timeline (see below) |
+| Output of the front end | `Observation`, `Telemetry` | the same `Observation`, `Telemetry` |
+| Everything downstream | identical: `Store`, `build-events`, `analyze` never learn which one produced the data |
+
+## What is real and what is simulated
+**Real:** the video file, its decoding, the sampled frames and their pixels, the frame-change gate scores, the frame
+identity hashes, and (once M5B exists) the vision model's descriptions. **Simulated:** the drone telemetry (a demo video
+carries none), the zone each frame is assigned to, and the wall-clock time of each frame. **Canned:** the only cassette
+in the repository comes from `make-demo-video` and its descriptions are written by that tool, not by a vision model; the
+cassette says so in its `provider` field and the CLI prints it.
+
+## Video source (`video/source.py`)
+`VideoSource(path)` checks that the file exists and is non-empty, that OpenCV opens it, that FPS is finite and in `(0, 1000]`, that
+the container reports frames, and that the FIRST FRAME REALLY DECODES; otherwise `VideoError`. `VideoMetadata`:
+file name, `sha256` of the file bytes, `fps`, `frame_count`, `width`, `height`, `duration_seconds = frame_count / fps`
+(container frame counts can be inexact; the sampler reports frames it could not reach). A capture is opened per pass in a
+context manager, so it is always released.
+
+## Sampling (`video/sampling.py`)
+Time-based and deterministic. Sample `k` is at offset `k * every_seconds`; its frame index is `floor(offset * fps + 0.5)`
+(round to nearest frame), so the same video and config always give the same indexes, also for non-integer FPS (tested at
+12.5 and 29.97 fps). Sampling stops at the end of the video, never repeats a frame for very small intervals, and can be
+capped with `max_samples`. The recorded offset of a sample is the decoded frame's own time, `index / fps`. Frames are
+read sequentially with `grab()` and only planned frames are `retrieve()`d, which is simple and reliable across codecs
+(seeking is a later optimisation). A `SamplingReport` states original frames, duration, samples planned, decoded,
+failed to decode, and never reached because the stream ended early.
+
+A `SampledFrame` holds `frame_id` (= `frame_index`, unique within one video and meaningful as evidence), `frame_index`, `offset_seconds`,
+`source`, `width`, `height`, `frame_key`, `content_hash` and the pixels. **Pixels are never persisted**: `image` lives only
+until `release()` (the pipeline releases each frame right after use), and nothing raw goes into SQLite.
+
+## Frame-change gate (`video/gate.py`)
+Purpose: do not send nearly identical sampled frames to a (paid, slow) vision model. Metric: mean absolute difference of
+0-255 grey values between small greyscale copies (`resize_width` x `resize_height`, default 64x36) of the current frame and
+the LAST ACCEPTED frame. The first frame always passes; a frame is accepted when `score >= threshold` (default 6.0;
+`0` accepts everything; `enabled: false` accepts everything). Comparing with the last accepted frame, not the previous
+one, means slow drift eventually gets through. Each decision records `(accepted, score, reason)` where reason is
+`first`, `changed`, `similar` or `gate_disabled`. **This is not motion detection or object tracking**; it knows nothing
+about content, only that pixels changed. The default threshold is an uncalibrated starting point: on the synthetic video,
+identical frames score exactly 0.0 and real scene changes score 13-26, so anything between works there; real footage
+(sensor noise, compression, lighting) needs calibration in M5B.
+
+**Skipped frames and events (important).** A skipped frame produces no model call. But the event aggregator treats time
+without observations as an unobserved gap, so a person standing still in an unchanged scene would be cut into several
+events. Policy `carry` (default) therefore records, for each skipped frame, a COPY of the last accepted observation with the
+frame's own id and time and `source = "<provider>+carried"`; it costs nothing and keeps a static scene one continuous
+activity. Policy `drop` records nothing for skipped frames (see `test_dropping_skipped_frames_shortens_the_person_event`:
+the 6 s person event collapses to one frame with duration 0). Carrying asserts "nothing visibly changed, so the same
+objects are still there", which is wrong if a small object appears or leaves without changing the small greyscale image
+much. The gate is reset whenever the simulated zone changes, so objects are never carried into a new zone.
+
+**A carried observation is temporal propagation, NOT a new inference.** It repeats the description and objects of the last
+accepted observation, which the vision model produced for an earlier frame; the model never looked at the carried frame. Its
+frame id and timestamp are real (the frame was sampled and judged unchanged by the pixel gate) but its *content* is inherited, and
+it is labelled `source = "<provider>+carried"` in the observations table so it can always be told apart from a model answer.
+Counts such as "provider calls" and "cassette replays" include only genuine model answers; carried observations are reported
+separately ("carried N"). Carry-forward is the default (decided after review); `--skipped drop` is the explicit alternative that
+stores no observation for skipped frames.
+
+## VisionProvider boundary (`vision/base.py`, `vision/contract.py`)
+`VisionProvider.analyze(FrameInput) -> Observation` is the single boundary and is unchanged for the scripted provider.
+`FrameInput` gained optional fields for video (`zone`, `source_name`, `offset_seconds`, `frame_key`, `content_hash`,
+`image`); a scripted frame still needs only `frame_id` and `timestamp`.
+
+A real provider implements the smaller `FrameDescriber.describe(frame) -> ProviderOutput`: look at the pixels and report
+what is visible. `DescriberProvider` adapts any describer to `VisionProvider` and `observation_from_output` builds the
+`Observation`: the pipeline, not the model, assigns `observation_id`, zone, timestamp and source. The provider therefore
+never decides where or when something happened, and never decides whether it is dangerous; those belong to the simulated
+timeline and the deterministic rules. `PROVIDER_INSTRUCTIONS` (versioned in `contract.py`) tells a model to report only
+visible objects and coarse attributes and forbids identity, intent, criminality, unreadable plates and unseen details.
+
+**`ProviderOutput` schema (strict, validated by Pydantic):**
+```
+{"description": str (1-1000 chars, not blank),
+ "objects": [ {"type": "person" | "vehicle" | "other",
+               "activity": str | null (1-100 chars),
+               "attributes": {lower_snake_case_key: str (1-100 chars)} (max 10),
+               "confidence": float 0..1 | null } ]  (max 50 objects)}
+```
+Unknown keys, wrong types, out-of-range values and blank text are rejected with a `ProviderOutputError` that names the
+field. The only normalisation is stripping one surrounding markdown code fence. Nothing else is repaired or filled in.
+`confidence` may be null if the provider does not report it; converting such an object to an `Observation` then requires an
+explicit `default_confidence` (a placeholder meaning "not reported", not a probability), otherwise it is an error. The rules do
+not use confidence today.
+
+## Cassettes (`vision/cassette.py`)
+A cassette is a JSON file of recorded, already validated provider responses so that demos and tests need no API key, survive
+outages, cost no tokens and are reproducible. Contents ONLY: format/version, a `provider` label (who produced the responses),
+the video's file name, sha256, fps, frame count and size, and per frame `key`, `frame_index`, `offset_seconds`, `content_hash`
+and `output`. No images, no paths, no secrets, no prompts, and nothing from the confidential assignment.
+
+**Frame identity.** `frame_key = "<video sha256[:16]>:<frame index>"`: stable across machines and OpenCV builds because it
+depends on the file bytes, not on decoded pixels; a re-encoded video simply misses. `content_hash` (sha256 of a 32x32
+greyscale copy) is an audit value: on replay a difference is counted and shown ("Cassette content mismatches"), not fatal,
+because decoders can differ slightly. A cassette recorded for another video is refused up front (`CassetteMismatch`).
+
+**Modes** (`CassetteDescriber`): `replay` answers from the cassette and a missing frame is a clear `CassetteMiss` (the inner
+provider is never called); `record` answers from the cassette when it can, otherwise calls the inner describer, stores the
+response and `flush()` writes the file deterministically (sorted, stable formatting); `live` always calls the inner describer
+and ignores the cassette. Replay is what the CLI exposes and what runs against real data now; record and live are implemented
+and unit-tested with a fake describer, but no real model call exists.
+
+## Simulated telemetry for video (`video/timeline.py`)
+A `VideoTimeline` is a SIMULATED start datetime plus the same patrol configuration as scenarios. `--start` and `--zone` make a
+one-zone timeline covering the whole video; `--timeline FILE` gives several zones over time (the same `telemetry:` block as a
+scenario). The M1 simulator produces the telemetry and the M1 nearest-prior `TelemetrySynchronizer` attaches it to each
+observation, exactly as for scripted data. The timeline must cover the video (else `TimelineError`). The CLI labels the row
+"SIMULATED telemetry samples (not from the video)". Frame ids equal source frame indexes, so one database holds one video.
+
+## Synthetic test video (`video/synthetic.py`)
+A deterministic 20 s, 10 fps, 320x180 video of four obvious scenes (empty yard, a person static for 8 s, a blue vehicle, empty
+yard), written as MJPG `.avi` (each frame is its own JPEG, so identical frames decode identically). It is generated inside the
+tests (session fixture) or by `make-demo-video` into the gitignored `output/`; no video is committed. With `--sample-every 2` it
+gives 10 samples of which the gate accepts 4 (frames 0, 40, 120, 160) and skips 6.
+
+## CLI
+`ingest-video VIDEO --db DB --provider cassette --cassette FILE [--sample-every S] [--no-gate] [--gate-threshold T]
+[--gate-resize WxH] [--skipped carry|drop] [--start ISO --zone Z | --timeline YAML] [--verbose]`, and
+`make-demo-video [--out-dir DIR]`. The summary reports video duration, original frames, sample candidates (decoded / failed / beyond
+end), gate accepted and skipped, provider calls and cassette replays, observations and objects written, simulated telemetry samples and
+stale associations. It does NOT build events or alerts; run `build-events` and `analyze` next. The whole pipeline runs before the
+database is opened, so any error (bad video, cassette miss, malformed response, short timeline) leaves no database behind.
+
+## What the real VLM provider (M5B) must implement
+One class implementing `FrameDescriber`: `name: str` and `describe(frame: FrameInput) -> ProviderOutput`.
+* **Input:** `frame.image` (BGR uint8 ndarray, typically 320-1920 px wide; downscale and JPEG/PNG-encode it for the API), plus
+  `frame.frame_key`, `frame.offset_seconds` for logging. The prompt is `PROVIDER_INSTRUCTIONS`; the JSON Schema is `provider_output_schema()`.
+* **Output:** a validated `ProviderOutput`, built with `parse_provider_output(text_or_dict)`. Wrap the network call so that a malformed
+  reply gets at most one bounded retry (then raises `ProviderOutputError`), transient errors (timeout, 429, 5xx) get a bounded backoff, and
+  authentication errors fail immediately with a clear message. The API key comes only from an environment variable and is never written to
+  a cassette, log or database.
+* **Wiring:** `DescriberProvider(CassetteDescriber(cassette, CassetteMode.RECORD, inner=MyVlm(), path=...))` records on first use and replays
+  afterwards; `ingest-video` needs a `--provider <name>` choice and `--cassette-mode replay|record|live`. `flush()` must run even if a frame fails
+  midway so paid responses are not lost.
+* **Not needed:** any change to sampling, the gate, the store, events, entities or rules.

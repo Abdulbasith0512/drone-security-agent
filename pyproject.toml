@@ -9,7 +9,8 @@ description = "Drone Security Analyst Agent prototype (video + telemetry -> even
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.5",               # validates scenario / VLM output, defines domain models
-    "opencv-python-headless>=4.8", # frame sampling, resize, frame-diff gate
+    "opencv-python-headless>=4.8", # video decoding, frame sampling, frame-diff gate
+    "numpy>=1.24",                 # pixel arrays (frame gate, synthetic video); opencv needs it too
     "PyYAML>=6.0",                 # scenarios, zones, rule thresholds
     "rich>=13.0",                  # CLI console output
 ]

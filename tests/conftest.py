@@ -34,3 +34,39 @@ def store(tmp_path):
 
     with Store.open(tmp_path / "test.db") as s:
         yield s
+
+
+def write_video(path, frames, fps: float = 10.0):
+    """Write BGR frames as an MJPG .avi (each frame is its own JPEG, so it is deterministic)."""
+    import cv2
+
+    height, width = frames[0].shape[:2]
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, (width, height))
+    if not writer.isOpened():
+        pytest.skip("this OpenCV build cannot write MJPG video")
+    for frame in frames:
+        writer.write(frame)
+    writer.release()
+    return path
+
+
+@pytest.fixture(scope="session")
+def demo_video(tmp_path_factory):
+    """The synthetic 20 s, 10 fps demo video, generated once per test session (never committed)."""
+    from drone_agent.video import VideoError
+    from drone_agent.video.synthetic import write_demo_video
+
+    try:
+        return write_demo_video(tmp_path_factory.mktemp("video") / "demo.avi")
+    except VideoError:
+        pytest.skip("this OpenCV build cannot write MJPG video")
+
+
+@pytest.fixture(scope="session")
+def demo_cassette_path(demo_video, tmp_path_factory):
+    """A cassette with canned responses for every 1 s frame of the demo video."""
+    from drone_agent.video.synthetic import build_demo_cassette
+
+    path = tmp_path_factory.mktemp("cassette") / "demo.cassette.json"
+    build_demo_cassette(demo_video).save(path)
+    return path

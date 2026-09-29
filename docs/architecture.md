@@ -39,6 +39,7 @@ Rules decide; the LLM explains and answers from tool output only.
 ```
 drone_agent/
   models/ telemetry/ vision/ store/ pipeline/ rules/ agent/   # agent/ is the only place langchain is imported
+config/events.yaml                                           # M3 thresholds
 scenarios/  tests/  bench/  docs/
 ```
 Dependency direction: `agent` -> `store`; `rules` -> `models`; core packages never import `agent`.
@@ -138,3 +139,117 @@ that nothing (including the FTS row) is left behind.
 `Store.query_observations(start, end, zone, object_type, text, limit)` ANDs all given filters and returns
 validated `Observation` objects; `get_observation`, `get_observation_by_frame` and `count_*` complete the API.
 CLI: `ingest <scenario> --db <path>` and `query --db <path> [--zone] [--object] [--search] [--start] [--end] [--limit] [--explain]`.
+
+---
+
+# Events and entity memory (M3)
+
+Implemented in `drone_agent/pipeline/` (`aggregator.py`, `linker.py`, `normalize.py`, `config.py`, `build.py`),
+persisted by `drone_agent/store/derived.py`, thresholds in `config/events.yaml`.
+Flow: `stored observations -> EventAggregator -> events -> EntityLinker -> entities -> SQLite`.
+No LLM is involved anywhere in this stage, and there are no alerts or rules yet (M4).
+
+```
+FRAME OBSERVATIONS                         EVENT                          ENTITY (vehicles only)
+23:41 person ─┐
+23:42 person  │
+23:43 person  │    EVT-P-001  main_gate  23:41 -> 23:49  (8 min)
+23:44 person  ├──  evidence: frames 1-4, 6-9              (people are never linked)
+23:45 (missed)│    frame 5 = tolerated gap
+23:46 person  │
+...           │
+23:49 person ─┘
+
+blue pickup, parking_area  ── EVT-V-001 ─┐
+dark blue pickup, driveway ── EVT-V-002 ─┼── ENT-V-001  "similar blue pickup" (coarse match, 3 appearances)
+blue pickup, main_gate     ── EVT-V-003 ─┘
+white sedan, parking_area  ── EVT-V-004 ──── ENT-V-002  "similar white sedan" (1 appearance)
+```
+
+## This is temporal association, not tracking
+The aggregator never looks at pixels and does not estimate motion or identity. It groups *detections* (an
+object reported in a frame by a VLM or a script) that agree on object type, zone and coarse stable attributes and
+follow each other closely in time. Do not read an event as "we tracked this person"; read it as "detections
+that are consistent with one ongoing activity". Likewise the entity memory is not re-identification or face/plate
+recognition; it says "a similar vehicle appeared N times".
+
+## What an Event is
+`Event` (model in `models/event.py`): `event_id` (`EVT-P-001`, `EVT-V-001`, ... numbered per object type in
+first-seen order), `object_type`, `zone`, `first_seen`, `last_seen` (`duration_seconds` = last - first, so a single
+sighting has duration 0), `attributes` (most common raw value per key; ties go to the earliest), `activities`
+(distinct, in order of appearance), `description` (of the first observation), `observation_ids` and `frame_ids`
+(the evidence; `evidence_count` = number of observations), `close_reason` and `entity_id` (vehicles only).
+Each detection belongs to exactly one event (tested: evidence rows equal detections). Observations that contain
+nothing are not evidence but still count as "missed frames" for events open in their zone.
+
+## Aggregation algorithm (`EventAggregator`, streaming: `process()` per observation, `flush()` at the end)
+For each observation in chronological order:
+1. **Close** open events that this observation rules out: a different zone is now observed (`zone_change`), or the last
+   matching detection is older than `max_gap_seconds` (`gap`).
+2. **Match** each detection to an open event with the same object type (and, since step 1, the same zone) whose stable
+   attributes are compatible; the most recently seen event wins. Otherwise open a new event.
+3. **Count misses:** every open event in this observation's zone that got no detection has missed one frame; more than
+   `max_missed_frames` consecutive misses close it (`missed_frames`).
+4. Events still open when input ends are closed by `flush()` (`scenario_end`).
+
+**Compatibility:** for each stable attribute (person: `clothing`; vehicle: `color`, `body_type`) present on both the
+detection and the event, the *normalised* values must be equal. A key missing on either side is "unknown" and does not
+block a match. Normalisation is used for matching only, stored attributes keep the original text:
+`dark blue` / `light blue` -> `blue`, `grey` -> `gray`, `pickup truck` -> `pickup`, case/hyphens/spacing ignored.
+Colours beyond the configured modifier list (e.g. `navy`) are left alone; nothing is guessed.
+
+**Flicker tolerance** has two knobs (`config/events.yaml`): `max_gap_seconds` (default 180) and `max_missed_frames`
+(default 2). In `security_events` frame 5 has no person; the gap is 120 s and 1 missed frame, both within tolerance, so
+frames 1-9 stay ONE event with frame 5 shown as "gap tolerated". Both limits are hard: longer gaps split events
+(`test_gap_longer_than_max_gap_splits_the_event`, `test_too_many_consecutive_missed_frames_split_the_event`).
+Missed frames only count in the event's own zone, because a frame taken elsewhere is not evidence of absence.
+
+**Boundaries.** Events close on gap, missed frames, zone change and end of input. One deliberate deviation from
+"close when incompatible attributes appear": an incompatible detection opens a *separate* event but does not close the
+existing one. Otherwise two people standing together would keep truncating each other's events. Events crossing
+midnight work (timestamps are timezone-aware; tested from 23:59 to 00:01).
+
+## Entity memory (`EntityLinker`, vehicles only)
+Separate vehicle events are grouped into an `Entity` (`ENT-V-001`, ...) when ALL hold:
+1. the event starts after the entity's latest event ended (overlapping vehicles are different vehicles);
+2. explicit plates, if both sides have one, must be shared (conflicting plates never link);
+3. equal normalised values for every required attribute (`color`, `body_type`), or a shared explicit plate.
+A missing required attribute means unknown and never links, so we never invent evidence. Among candidates the most
+recently seen entity wins. Persons and other objects are never linked: person events stay separate on purpose.
+
+**Why coarse and similarity-based.** A VLM reports "blue pickup", not an identity. Two blue pickups look alike, one
+vehicle can be described as "dark blue" at night, and the input has no plate evidence. So an entity is labelled
+`similar blue pickup` with `match_level = coarse_match`. Only when every linked event carries the same explicit `plate`
+attribute is the level `confirmed`. **Why persons are excluded:** clothing is a weak, changeable cue, linking people
+across time would be identity recognition with real privacy and error costs, and nothing in the requirements needs it.
+
+**Limitations (possible errors).** False merges: two different blue pickups become one entity; two people with the
+same clothing in the same zone and time may share an event. False splits: one person who leaves and returns, or a
+drone that leaves a zone and returns within the gap, becomes two events (the zone-change rule is conservative);
+a VLM describing the same vehicle as "blue" then "black" produces two entities. Frames and zones come from the drone's
+position (M1 assumption), so an event is "seen while the drone was in this zone", not a precise location.
+Thresholds are tuned by hand on two scripted scenarios; there is no evaluation on real footage yet.
+
+## Persistence (schema version 2)
+Added tables (`store/schema.py`): `events`, `event_observations` (evidence: event -> observation, chronological
+`position`; frames come through the observation), `entities`, `entity_events` (`event_id` UNIQUE: an event belongs to
+at most one entity). Foreign keys enforce `entity -> events -> observations -> frames`. Duration and evidence counts
+are derived, not stored. Indexes: `idx_events_zone_first (zone, first_seen_utc)` and `idx_events_type_first
+(object_type, first_seen_utc)` for zone/type listings over time (used by M4/M6), and `idx_event_obs_observation`
+for the reverse lookup "which events used this frame".
+
+**Versioning.** `PRAGMA user_version` is 2. Migrations are ordered and additive (`MIGRATIONS[1]` = M2 schema,
+`MIGRATIONS[2]` = M3 tables), so an existing M2 database is upgraded in place without touching its data, the CLI
+prints "upgraded database schema from v1", and a database from a newer version is refused
+(`test_m2_database_is_upgraded_in_place_without_losing_data`, `test_database_from_a_newer_version_is_refused`).
+
+**Idempotency of `build-events`: replace.** Events and entities are derived data (a pure function of observations +
+config), so the command clears them and rewrites everything in ONE transaction. Running it twice gives identical
+results and never duplicates evidence; running it with a different config replaces the old events; a failure leaves the
+previous derived data intact. This differs on purpose from `ingest`, which rejects duplicates because observations are
+source evidence and must never be silently overwritten.
+
+## CLI
+`build-events --db DB [--config YAML]`, `events --db DB [--zone] [--object] [--entity] [--evidence EVENT_ID]`,
+`entities --db DB [--show ENTITY_ID]`. `--evidence` prints the chain event -> observations -> frames and marks frames
+where the detector missed as "gap tolerated". Table cells are printed literally (never parsed as Rich markup).

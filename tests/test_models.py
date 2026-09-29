@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from conftest import IST
@@ -6,8 +6,11 @@ from pydantic import ValidationError
 
 from drone_agent.models import (
     Alert,
+    CloseReason,
     DetectedObject,
+    Entity,
     Event,
+    MatchLevel,
     ObjectType,
     Observation,
     Severity,
@@ -105,20 +108,52 @@ def test_models_are_immutable():
         _obs().description = "changed"
 
 
-def test_event_requires_ordered_times_and_observations():
+def test_event_requires_ordered_times_and_matching_evidence():
     kwargs = dict(
         event_id="e1",
         object_type=ObjectType.PERSON,
         zone=Zone.MAIN_GATE,
         first_seen=T0,
-        last_seen=T0,
-        observation_ids=["obs-1"],
+        last_seen=T0 + timedelta(seconds=90),
+        observation_ids=["obs-1", "obs-2"],
+        frame_ids=[1, 2],
+        close_reason=CloseReason.GAP,
     )
-    assert Event(**kwargs)
+    event = Event(**kwargs)
+    assert event.duration_seconds == 90
+    assert event.evidence_count == 2
+    assert Event.model_validate_json(event.model_dump_json()) == event
     with pytest.raises(ValidationError):
         Event(**{**kwargs, "last_seen": datetime(2026, 9, 29, 23, 0, tzinfo=IST)})
     with pytest.raises(ValidationError):
         Event(**{**kwargs, "observation_ids": []})
+    with pytest.raises(ValidationError, match="same length"):
+        Event(**{**kwargs, "frame_ids": [1]})
+
+
+def test_entity_is_vehicle_only_and_labels_do_not_overclaim():
+    kwargs = dict(
+        entity_id="ENT-V-001",
+        entity_type=ObjectType.VEHICLE,
+        attributes={"color": "blue", "body_type": "pickup"},
+        match_level=MatchLevel.COARSE,
+        first_seen=T0,
+        last_seen=T0,
+        event_ids=["EVT-V-001", "EVT-V-002"],
+    )
+    entity = Entity(**kwargs)
+    assert entity.appearance_count == 2
+    assert entity.label == "similar blue pickup"
+    confirmed = Entity(
+        **{
+            **kwargs,
+            "match_level": MatchLevel.CONFIRMED,
+            "attributes": {**kwargs["attributes"], "plate": "AB12CD"},
+        }
+    )
+    assert confirmed.label.startswith("confirmed") and "AB12CD" in confirmed.label
+    with pytest.raises(ValidationError, match="vehicle-only"):
+        Entity(**{**kwargs, "entity_type": ObjectType.PERSON})
 
 
 def test_alert_schema_accepts_severity_and_rejects_unknown():

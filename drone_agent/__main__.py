@@ -1,4 +1,4 @@
-"""CLI entry point: `python -m drone_agent <simulate|ingest|query> ...`."""
+"""CLI entry point: `python -m drone_agent <command> ...` (run with -h for the command list)."""
 
 import argparse
 import sys
@@ -8,12 +8,28 @@ from datetime import datetime
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from drone_agent.ingest import ingest_result
-from drone_agent.models import DetectedObject, ObjectType, Observation, Zone
+from drone_agent.models import (
+    DetectedObject,
+    Entity,
+    Event,
+    MatchLevel,
+    ObjectType,
+    Observation,
+    Zone,
+)
+from drone_agent.pipeline import ConfigError, build_events, load_config
 from drone_agent.scenario import ScenarioError, load_scenario
 from drone_agent.simulate import run_scenario
 from drone_agent.store import DuplicateRecordError, Fts5UnavailableError, Store, StoreError
+
+
+# ---- formatting helpers ---------------------------------------------------------------------
+def _cell(value: object) -> Text:
+    """Table cell shown literally (never parsed as Rich markup)."""
+    return Text(str(value))
 
 
 def _format_object(obj: DetectedObject) -> str:
@@ -38,10 +54,47 @@ def _format_telemetry(obs: Observation) -> str:
     )
 
 
+def _frame_ranges(frames: Sequence[int]) -> str:
+    """[1, 2, 3, 4, 6, 7] -> '1-4,6-7'."""
+    ordered = sorted(set(frames))
+    parts: list[str] = []
+    start = prev = None
+    for f in ordered:
+        if start is None:
+            start = prev = f
+        elif f == prev + 1:
+            prev = f
+        else:
+            parts.append(str(start) if start == prev else f"{start}-{prev}")
+            start = prev = f
+    if start is not None:
+        parts.append(str(start) if start == prev else f"{start}-{prev}")
+    return ",".join(parts)
+
+
+def _clock(ts: datetime) -> str:
+    return ts.strftime("%m-%d %H:%M:%S")
+
+
+def _duration(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+
+
+def _attrs(attributes: dict[str, str]) -> str:
+    return ", ".join(f"{k}={v}" for k, v in attributes.items()) or "-"
+
+
 def _error(console: Console, message: str) -> None:
     console.print(f"[red]error:[/red] {escape(message)}", highlight=False)
 
 
+def _note_migration(console: Console, store: Store) -> None:
+    if store.migrated_from is not None:
+        console.print(f"note: upgraded database schema from v{store.migrated_from} (data kept)")
+
+
+# ---- M1/M2 commands -------------------------------------------------------------------------
 def simulate_command(path: str, console: Console) -> int:
     try:
         scenario = load_scenario(path)
@@ -50,7 +103,7 @@ def simulate_command(path: str, console: Console) -> int:
         return 2
     result = run_scenario(scenario)
 
-    console.print(f"[bold]{scenario.name}[/bold]: {scenario.description}", highlight=False)
+    console.print(Text.assemble((scenario.name, "bold"), f": {scenario.description}"))
     console.print(
         f"start {scenario.start.isoformat()}  |  {len(result.observations)} frames  |  "
         f"{len(result.telemetry)} telemetry samples (synthetic coordinates)"
@@ -60,12 +113,12 @@ def simulate_command(path: str, console: Console) -> int:
         table.add_column(col, overflow="fold")
     for obs in result.observations:
         table.add_row(
-            obs.timestamp.strftime("%m-%d %H:%M:%S"),
-            str(obs.frame_id),
-            obs.zone.value,
-            obs.description,
-            _format_objects(obs),
-            _format_telemetry(obs),
+            _cell(obs.timestamp.strftime("%m-%d %H:%M:%S")),
+            _cell(obs.frame_id),
+            _cell(obs.zone.value),
+            _cell(obs.description),
+            _cell(_format_objects(obs)),
+            _cell(_format_telemetry(obs)),
         )
     console.print(table)
     return 0
@@ -80,6 +133,7 @@ def ingest_command(path: str, db: str, console: Console) -> int:
     result = run_scenario(scenario)
     try:
         with Store.open(db) as store:
+            _note_migration(console, store)
             summary = ingest_result(store, result)
     except DuplicateRecordError as exc:
         _error(
@@ -98,13 +152,13 @@ def ingest_command(path: str, db: str, console: Console) -> int:
     table = Table(title="Ingest summary", show_header=False)
     table.add_column(style="bold")
     table.add_column()
-    table.add_row("Scenario", summary.scenario)
-    table.add_row("Frames ingested", str(summary.frames))
-    table.add_row("Observations ingested", str(summary.observations))
-    table.add_row("Objects ingested", str(summary.objects))
-    table.add_row("Telemetry samples", str(summary.telemetry_samples))
-    table.add_row("Stale telemetry associations", str(summary.stale_associations))
-    table.add_row("Database", db)
+    table.add_row("Scenario", _cell(summary.scenario))
+    table.add_row("Frames ingested", _cell(summary.frames))
+    table.add_row("Observations ingested", _cell(summary.observations))
+    table.add_row("Objects ingested", _cell(summary.objects))
+    table.add_row("Telemetry samples", _cell(summary.telemetry_samples))
+    table.add_row("Stale telemetry associations", _cell(summary.stale_associations))
+    table.add_row("Database", _cell(db))
     console.print(table)
     return 0
 
@@ -129,6 +183,7 @@ def query_command(args: argparse.Namespace, console: Console) -> int:
     }
     try:
         with Store.open(args.db) as store:
+            _note_migration(console, store)
             if args.explain:
                 for line in store.explain_query(**filters):
                     console.print(line, markup=False, highlight=False)
@@ -143,12 +198,186 @@ def query_command(args: argparse.Namespace, console: Console) -> int:
         table.add_column(col, overflow="fold")
     for obs in rows:
         table.add_row(
-            obs.timestamp.isoformat(timespec="seconds"),
-            str(obs.frame_id),
-            obs.observation_id,
-            obs.zone.value,
-            obs.description,
-            _format_objects(obs),
+            _cell(obs.timestamp.isoformat(timespec="seconds")),
+            _cell(obs.frame_id),
+            _cell(obs.observation_id),
+            _cell(obs.zone.value),
+            _cell(obs.description),
+            _cell(_format_objects(obs)),
+        )
+    console.print(table)
+    return 0
+
+
+# ---- M3 commands ----------------------------------------------------------------------------
+def build_events_command(db: str, config_path: str | None, console: Console) -> int:
+    try:
+        config = load_config(config_path)
+        with Store.open(db) as store:
+            _note_migration(console, store)
+            summary = build_events(store, config)
+    except (ConfigError, StoreError) as exc:
+        _error(console, str(exc))
+        return 1
+
+    ratio = summary.compression_ratio
+    table = Table(title="Build events summary", show_header=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Observations analyzed", _cell(summary.observations))
+    table.add_row("Object detections", _cell(summary.detections))
+    table.add_row(
+        "Events generated",
+        _cell(
+            f"{summary.events} (person {summary.person_events}, "
+            f"vehicle {summary.vehicle_events}, other {summary.other_events})"
+        ),
+    )
+    table.add_row(
+        "Compression ratio",
+        _cell(
+            f"{summary.detections} detections -> {summary.events} events"
+            + (f" = {ratio:.2f} detections/event" if ratio else "")
+        ),
+    )
+    table.add_row("Vehicle entities (similar-vehicle groups)", _cell(summary.entities))
+    table.add_row("Multi-appearance entities", _cell(summary.multi_appearance_entities))
+    table.add_row(
+        "Replaced previous",
+        _cell(f"{summary.replaced_events} events, {summary.replaced_entities} entities"),
+    )
+    console.print(table)
+    return 0
+
+
+def _event_table(events: list[Event], title: str) -> Table:
+    table = Table(title=title)
+    for col in (
+        "Event",
+        "Type",
+        "Zone",
+        "First seen",
+        "Last seen",
+        "Duration",
+        "Frames",
+        "Attributes",
+    ):
+        table.add_column(col, overflow="fold")
+    table.add_column("Entity", overflow="fold")
+    for ev in events:
+        table.add_row(
+            _cell(ev.event_id),
+            _cell(ev.object_type.value),
+            _cell(ev.zone.value),
+            _cell(_clock(ev.first_seen)),
+            _cell(_clock(ev.last_seen)),
+            _cell(_duration(ev.duration_seconds)),
+            _cell(f"{ev.evidence_count} obs: {_frame_ranges(ev.frame_ids)}"),
+            _cell(_attrs(ev.attributes)),
+            _cell(ev.entity_id or "-"),
+        )
+    return table
+
+
+def _entity_summary(entity: Entity) -> str:
+    kind = (
+        "confirmed by explicit plate"
+        if entity.match_level is MatchLevel.CONFIRMED
+        else ("COARSE match (similar vehicle, identity not confirmed)")
+    )
+    return f"{entity.entity_id}: {entity.label}, {entity.appearance_count} appearance(s), {kind}"
+
+
+def _show_event_evidence(store: Store, event_id: str, console: Console) -> int:
+    event = store.get_event(event_id)
+    if event is None:
+        _error(console, f"no event {event_id}")
+        return 1
+    console.print(_event_table([event], f"Event {event_id}"))
+    console.print(_cell(f"description: {event.description}"))
+    if event.activities:
+        console.print(_cell(f"activities: {', '.join(event.activities)}"))
+    console.print(_cell(f"closed by: {event.close_reason.value}"))
+    if event.entity_id:
+        entity = store.get_entity(event.entity_id)
+        if entity:
+            console.print(_cell(f"entity: {_entity_summary(entity)}"))
+
+    evidence = {o.observation_id: o for o in store.get_event_observations(event_id)}
+    span = store.query_observations(zone=event.zone, start=event.first_seen, end=event.last_seen)
+    table = Table(title="Evidence: event -> observations -> frames")
+    for col in ("Frame", "Time", "Observation", "Role", "Description"):
+        table.add_column(col, overflow="fold")
+    for obs in span:
+        used = obs.observation_id in evidence
+        table.add_row(
+            _cell(obs.frame_id),
+            _cell(_clock(obs.timestamp)),
+            _cell(obs.observation_id),
+            _cell("EVIDENCE" if used else "no detection (gap tolerated)"),
+            _cell(obs.description),
+        )
+    console.print(table)
+    return 0
+
+
+def events_command(args: argparse.Namespace, console: Console) -> int:
+    try:
+        with Store.open(args.db) as store:
+            _note_migration(console, store)
+            if args.evidence:
+                return _show_event_evidence(store, args.evidence, console)
+            events = store.query_events(
+                zone=Zone(args.zone) if args.zone else None,
+                object_type=ObjectType(args.object) if args.object else None,
+                entity_id=args.entity,
+            )
+    except StoreError as exc:
+        _error(console, str(exc))
+        return 1
+    if not events:
+        console.print("no events found (run `build-events` first?)")
+        return 0
+    console.print(_event_table(events, f"{len(events)} event(s)"))
+    return 0
+
+
+def entities_command(args: argparse.Namespace, console: Console) -> int:
+    try:
+        with Store.open(args.db) as store:
+            _note_migration(console, store)
+            if args.show:
+                entity = store.get_entity(args.show)
+                if entity is None:
+                    _error(console, f"no entity {args.show}")
+                    return 1
+                console.print(_cell(_entity_summary(entity)))
+                events = store.query_events(entity_id=entity.entity_id)
+                console.print(_event_table(events, f"Appearances of {entity.entity_id}"))
+                console.print(
+                    _cell(
+                        "Note: linked on normalised coarse attributes "
+                        f"({_attrs(entity.attributes)}); this does not prove it is the same "
+                        "physical vehicle."
+                    )
+                )
+                return 0
+            entities = store.list_entities()
+    except StoreError as exc:
+        _error(console, str(exc))
+        return 1
+    table = Table(title=f"{len(entities)} entity(ies)")
+    for col in ("Entity", "Label", "Match", "Appearances", "First seen", "Last seen", "Events"):
+        table.add_column(col, overflow="fold")
+    for ent in entities:
+        table.add_row(
+            _cell(ent.entity_id),
+            _cell(ent.label),
+            _cell(ent.match_level.value),
+            _cell(ent.appearance_count),
+            _cell(_clock(ent.first_seen)),
+            _cell(_clock(ent.last_seen)),
+            _cell(", ".join(ent.event_ids)),
         )
     console.print(table)
     return 0
@@ -175,13 +404,36 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
     qry.add_argument("--limit", type=int)
     qry.add_argument("--explain", action="store_true", help="print the SQLite query plan only")
 
+    bld = sub.add_parser(
+        "build-events", help="derive events and vehicle entities from stored observations"
+    )
+    bld.add_argument("--db", required=True, help="SQLite database path")
+    bld.add_argument("--config", help="YAML thresholds (default: built-in, see config/events.yaml)")
+
+    evt = sub.add_parser("events", help="list events, or show one event's evidence")
+    evt.add_argument("--db", required=True, help="SQLite database path")
+    evt.add_argument("--zone", choices=[z.value for z in Zone])
+    evt.add_argument("--object", choices=[t.value for t in ObjectType], help="object type")
+    evt.add_argument("--entity", help="only events linked to this entity id")
+    evt.add_argument("--evidence", metavar="EVENT_ID", help="trace an event to its frames")
+
+    ent = sub.add_parser("entities", help="list similar-vehicle entities, or show one")
+    ent.add_argument("--db", required=True, help="SQLite database path")
+    ent.add_argument("--show", metavar="ENTITY_ID", help="show an entity's appearances")
+
     args = parser.parse_args(argv)
     console = console or Console()
     if args.command == "simulate":
         return simulate_command(args.scenario, console)
     if args.command == "ingest":
         return ingest_command(args.scenario, args.db, console)
-    return query_command(args, console)
+    if args.command == "query":
+        return query_command(args, console)
+    if args.command == "build-events":
+        return build_events_command(args.db, args.config, console)
+    if args.command == "events":
+        return events_command(args, console)
+    return entities_command(args, console)
 
 
 if __name__ == "__main__":

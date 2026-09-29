@@ -113,3 +113,49 @@ atomic-reject ingestion; events/alerts tables postponed.
 **Validation performed:** `pytest -v` (105 passed), `ruff check .` and `ruff format --check .` clean, end-to-end
 `ingest` of `security_events.yaml`, the three query demos, `EXPLAIN QUERY PLAN` inspection, a raw-SQLite check of row counts,
 `PRAGMA foreign_key_check` (no violations) and `PRAGMA integrity_check` (ok). Tests use isolated temp databases, no network and no API key.
+
+## M3: Temporal events and coarse vehicle entity memory
+**Tool:** Claude Code (Claude Sonnet 5.5), from my detailed M3 spec.
+
+**What the AI generated:** the extended `Event` model and new `Entity` model, `EventAggregator`, attribute
+normalisation, `EntityLinker`, the YAML/pydantic configuration, schema v2 with an in-place migration, event/entity
+persistence, `build_events`, the `build-events`/`events`/`entities` CLI commands, 58 new tests, and these docs.
+
+**Model changes (please review):** `Event` was extended from 6 fields to also carry `attributes`, `activities`,
+`description`, `frame_ids`, `close_reason` and `entity_id` (`duration_seconds` and `evidence_count` are properties,
+not stored fields). This changed one M1 test. `Entity` is new, vehicle-only by validation, and has `match_level`
+(`coarse_match` / `confirmed`) so the data model can say "similar vehicle" versus "confirmed vehicle".
+
+**Design decisions the AI made (please review)**
+- **Deviation from my spec:** I asked for events to close "when incompatible attributes appear". The AI did NOT
+  implement that literally: an incompatible detection starts a separate event but leaves the existing one open,
+  because closing it would truncate an event whenever two different people stand together. Incompatible attributes
+  still produce separate events, and this is tested.
+- Two flicker knobs, `max_gap_seconds` (180) and `max_missed_frames` (2); missed frames only count in the event's own zone.
+- Zone change always closes an event, even if the drone returns within the gap. This is conservative: it can split one
+  activity into two events but never merges across a zone the drone left.
+- Event ids are assigned when an event opens (`EVT-<P|V|O>-nnn`), so they follow first-seen order and do not depend on closing order.
+- Entity linking requires equal normalised `color` and `body_type`; a missing attribute never links. Overlapping
+  events are never the same vehicle. A plate is used only if the input supplied one.
+- `build-events` replaces derived data in one transaction (idempotent), while `ingest` still rejects duplicates.
+- Schema migrations are additive and versioned instead of failing on an M2 database.
+
+**Problems found and fixed during validation (honest log)**
+- Two M1/M2 tests failed because of the intended model/schema changes (`Event` fields, `STATEMENTS` renamed to
+  `MIGRATIONS`); I updated them rather than the code.
+- The first draft of the linker had convoluted plate handling; I rewrote it as three explicit rules before testing.
+- A review found that table cells were still parsed as Rich markup, so a VLM description containing `[/x]` would
+  crash the CLI. Cells now use `rich.text.Text`; `test_cli_prints_markup_like_descriptions_literally` covers it.
+- All new tests passed first time, which is not proof they can fail. I ran three deliberate mutations (no colour
+  normalisation, people linked, no flicker tolerance) and each was caught by the suite; the code was then restored.
+- I predicted the `security_events` outcome before running it (7 events, 2 entities); the real implementation produced
+  exactly that, and the metrics reported in the CLI come from the run, not from the tests' expectations.
+- No scenario ends with an event still open (the last event is closed by a zone change), so `scenario_end` is only
+  exercised by unit tests, not by the shipped scenarios.
+
+**How behaviour was validated:** unit tests for every boundary (adjacent frames, missed frame, long gap, missed-frame
+limit, zone change, incompatible attributes, midnight, flush, ordering, determinism, normalisation, config); linker
+tests (blue/dark-blue merge, sedan separation, missing attributes, overlap, people never linked, plate cases);
+persistence tests (round trip, foreign keys, atomic replace, idempotent rebuild, migration, newer-version refusal);
+scenario tests against the M1 ground truth; CLI tests; and a raw-SQL integrity inspection (`PRAGMA integrity_check`
+ok, `foreign_key_check` empty, evidence rows equal detections, no evidence outside an event's span or zone).

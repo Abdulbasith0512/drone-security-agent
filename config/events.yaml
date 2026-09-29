@@ -1,0 +1,23 @@
+# Thresholds for event aggregation and vehicle entity matching.
+# These values equal the built-in defaults; pass a modified copy with --config.
+aggregation:
+  # An event ends when the next matching detection is more than this many seconds after the last one.
+  max_gap_seconds: 180
+  # Flicker tolerance: an event survives this many consecutive frames (in its zone) without a
+  # matching detection. One more missed frame closes it.
+  max_missed_frames: 2
+  # Detections must agree on these attributes (after normalisation) to join the same event.
+  # A key that is missing on either side is treated as unknown and does not block a match.
+  stable_attributes:
+    person: [clothing]
+    vehicle: [color, body_type]
+    other: []
+
+normalization:          # used for matching only; stored attributes keep their original text
+  color_modifiers: [dark, light, deep, pale, bright]   # "dark blue" -> "blue"
+  color_aliases: {grey: gray}
+  body_type_aliases: {"pickup truck": pickup, "pick up": pickup}
+
+vehicle_matching:       # coarse "similar vehicle" memory (vehicles only, never people)
+  required_attributes: [color, body_type]   # missing evidence prevents a link
+  plate_attribute: plate                    # only used if the input explicitly supplies a plate

@@ -5,7 +5,7 @@ import re
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from drone_agent.models import (
@@ -16,33 +16,16 @@ from drone_agent.models import (
     TelemetryAssociation,
     Zone,
 )
-from drone_agent.store.schema import SCHEMA_VERSION, STATEMENTS
+from drone_agent.store.codec import canonical_json, utc_key
+from drone_agent.store.derived import DerivedMixin
+from drone_agent.store.errors import (
+    Fts5UnavailableError,
+    StoreError,
+    translate_integrity_error,
+)
+from drone_agent.store.schema import MIGRATIONS, SCHEMA_VERSION
 
-_UTC_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"  # fixed width, so text order == time order
 _IN_CHUNK = 500  # stay well below SQLite's bound-parameter limit
-
-
-class StoreError(Exception):
-    """Base class for store failures."""
-
-
-class DuplicateRecordError(StoreError):
-    """A record with the same primary/unique key already exists."""
-
-
-class Fts5UnavailableError(StoreError):
-    """This SQLite build lacks FTS5. There is deliberately no fallback search."""
-
-
-def _utc_key(ts: datetime) -> str:
-    if ts.tzinfo is None or ts.utcoffset() is None:
-        raise ValueError("timestamps must be timezone-aware")
-    return ts.astimezone(UTC).strftime(_UTC_FORMAT)
-
-
-def _attributes_json(attributes: dict[str, str]) -> str:
-    """Canonical JSON (sorted keys, no whitespace) so equal attributes give equal text."""
-    return json.dumps(attributes, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _fts_query(text: str) -> str:
@@ -67,12 +50,17 @@ def _objects_text(obs: Observation) -> str:
     return " ".join(parts)
 
 
-class Store:
-    """Explicit persistence API. One frame maps to one observation (frame_id is unique)."""
+class Store(DerivedMixin):
+    """Explicit persistence API. One frame maps to one observation (frame_id is unique).
+
+    `migrated_from` is the schema version an existing database was upgraded from (None if it was
+    new or already current).
+    """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
         self._depth = 0
+        self.migrated_from: int | None = None
 
     # ---- lifecycle -------------------------------------------------------------------------
     @classmethod
@@ -98,10 +86,13 @@ class Store:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             raise StoreError(f"database schema version {version} is newer than {SCHEMA_VERSION}")
+        if 0 < version < SCHEMA_VERSION:
+            self.migrated_from = version
         try:
             with self.transaction():
-                for statement in STATEMENTS:
-                    self._conn.execute(statement)
+                for target in range(version + 1, SCHEMA_VERSION + 1):
+                    for statement in MIGRATIONS[target]:
+                        self._conn.execute(statement)
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).lower():
@@ -149,7 +140,7 @@ class Store:
                     " zone, battery_percent) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         sample.timestamp.isoformat(),
-                        _utc_key(sample.timestamp),
+                        utc_key(sample.timestamp),
                         sample.latitude,
                         sample.longitude,
                         sample.altitude_m,
@@ -169,7 +160,7 @@ class Store:
         stored and identical to the stored row. Any failure leaves nothing behind.
         """
         with self.transaction():
-            ts_iso, ts_utc = obs.timestamp.isoformat(), _utc_key(obs.timestamp)
+            ts_iso, ts_utc = obs.timestamp.isoformat(), utc_key(obs.timestamp)
             telemetry_id = age = stale = None
             if obs.telemetry is not None:
                 telemetry_id = self._stored_telemetry_id(obs.telemetry.telemetry)
@@ -209,7 +200,7 @@ class Store:
                             obj.object_type.value,
                             obj.activity,
                             obj.confidence,
-                            _attributes_json(obj.attributes),
+                            canonical_json(obj.attributes),
                         )
                         for pos, obj in enumerate(obs.detected_objects)
                     ],
@@ -226,7 +217,7 @@ class Store:
 
     def _stored_telemetry_id(self, sample: Telemetry) -> int:
         row = self._conn.execute(
-            "SELECT * FROM telemetry WHERE ts_utc = ?", (_utc_key(sample.timestamp),)
+            "SELECT * FROM telemetry WHERE ts_utc = ?", (utc_key(sample.timestamp),)
         ).fetchone()
         if row is None:
             raise StoreError(
@@ -242,12 +233,7 @@ class Store:
 
     @staticmethod
     def _translate(exc: sqlite3.IntegrityError, what: str) -> StoreError:
-        if exc.sqlite_errorcode in (
-            sqlite3.SQLITE_CONSTRAINT_UNIQUE,
-            sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY,
-        ):
-            return DuplicateRecordError(f"{what} already exists ({exc})")
-        return StoreError(f"{what} violates a database constraint ({exc})")
+        return translate_integrity_error(exc, what)
 
     # ---- reads -----------------------------------------------------------------------------
     def get_observation(self, observation_id: str) -> Observation | None:
@@ -333,10 +319,10 @@ class Store:
             order = "bm25(observations_fts), o.ts_utc, o.frame_id"
         if start is not None:
             where.append("o.ts_utc >= ?")
-            params.append(_utc_key(start))
+            params.append(utc_key(start))
         if end is not None:
             where.append("o.ts_utc <= ?")
-            params.append(_utc_key(end))
+            params.append(utc_key(end))
         if zone is not None:
             where.append("o.zone = ?")
             params.append(Zone(zone).value)

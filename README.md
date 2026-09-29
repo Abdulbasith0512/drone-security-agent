@@ -3,7 +3,7 @@
 Prototype for the FlytBase AI Engineer assignment: a docked-drone security analyst that turns video and
 telemetry into events, deterministic alerts, searchable history and grounded Q&A.
 
-> **Status: M2 (storage and search).** `simulate`, `ingest` and `query` run; events, alerts and Q&A arrive in later milestones.
+> **Status: M3 (events and entity memory).** `simulate`, `ingest`, `query`, `build-events`, `events` and `entities` run; alerts, real video and Q&A arrive in later milestones.
 
 Design in one line: `FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING`.
 
@@ -27,14 +27,22 @@ No API key and no network are needed. Databases are written under `output/` (git
 python -m drone_agent simulate scenarios/security_events.yaml          # scripted frames + telemetry sync
 python -m drone_agent ingest   scenarios/security_events.yaml --db output/security.db
 python -m drone_agent query --db output/security.db --zone main_gate
-python -m drone_agent query --db output/security.db --object person
 python -m drone_agent query --db output/security.db --search "blue pickup"
 python -m drone_agent query --db output/security.db --zone main_gate --explain   # SQLite query plan
+
+python -m drone_agent build-events --db output/security.db                      # observations -> events -> entities
+python -m drone_agent events   --db output/security.db                          # list events
+python -m drone_agent events   --db output/security.db --evidence EVT-P-001     # event -> observations -> frames
+python -m drone_agent entities --db output/security.db --show ENT-V-001         # similar-vehicle entity and its events
 ```
+On `security_events` the 8-minute gate loiterer becomes ONE event (`EVT-P-001`, frames 1-4 and 6-9, frame 5 is a
+tolerated missed detection), and three separate blue-pickup sightings become three events grouped into one
+*similar-vehicle* entity (`ENT-V-001`). People are never linked across events. This is temporal association of
+detections, not object tracking or re-identification (see docs/architecture.md).
 `query` filters are ANDed and can be combined with `--start/--end` (ISO-8601 with a UTC offset).
-Ingesting the same scenario into the same database twice is rejected and changes nothing; use a new `--db` path.
-Storage design, FTS5 limitations and query plans: [docs/architecture.md](docs/architecture.md).
-Events, alerts and Q&A arrive in later milestones.
+`ingest` twice into the same database is rejected and changes nothing (use a new `--db`); `build-events` twice
+replaces the derived events (idempotent). Thresholds live in `config/events.yaml` (`--config` to override).
+Alerts and Q&A arrive in later milestones.
 
 ## Design decisions
 _TBD (M8). See docs/architecture.md._

@@ -1,14 +1,15 @@
-"""SQLite schema (version 1). Explicit DDL, no ORM.
+"""SQLite schema. Explicit DDL applied as ordered, additive migrations (tracked by user_version).
 
 Timestamps are stored twice: `timestamp` is the exact ISO-8601 text with its UTC offset (round-trips
 the original timezone), `ts_utc` is a fixed-width UTC string used for ordering, range filters and
 indexes (text comparison of ISO strings with different offsets would be wrong).
+
+Version 1 (M2): telemetry, frames, observations, detected_objects, observations_fts.
+Version 2 (M3): events, event_observations, entities, entity_events (derived data).
+Migrations only ever ADD objects, so an older database keeps all of its data when upgraded.
 """
 
-SCHEMA_VERSION = 1
-
-# Executed one statement at a time so failures point at a single statement.
-STATEMENTS: tuple[str, ...] = (
+_V1: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS telemetry (
         telemetry_id    INTEGER PRIMARY KEY,
@@ -76,3 +77,64 @@ STATEMENTS: tuple[str, ...] = (
     )
     """,
 )
+
+_V2: tuple[str, ...] = (
+    # Derived data: everything below can be regenerated from observations (see build-events).
+    # Duration and evidence counts are not stored; they are derived from first/last_seen and
+    # event_observations.
+    """
+    CREATE TABLE IF NOT EXISTS events (
+        event_id        TEXT PRIMARY KEY,
+        object_type     TEXT NOT NULL,
+        zone            TEXT NOT NULL,
+        first_seen      TEXT NOT NULL,
+        first_seen_utc  TEXT NOT NULL,
+        last_seen       TEXT NOT NULL,
+        last_seen_utc   TEXT NOT NULL,
+        attributes_json TEXT NOT NULL,
+        activities_json TEXT NOT NULL,
+        description     TEXT NOT NULL,
+        close_reason    TEXT NOT NULL
+            CHECK (close_reason IN ('gap', 'missed_frames', 'zone_change', 'scenario_end')),
+        CHECK (last_seen_utc >= first_seen_utc)
+    )
+    """,
+    # Evidence: event -> observations (and through them, frames). `position` is chronological.
+    """
+    CREATE TABLE IF NOT EXISTS event_observations (
+        event_id       TEXT NOT NULL REFERENCES events(event_id),
+        observation_id TEXT NOT NULL REFERENCES observations(observation_id),
+        position       INTEGER NOT NULL CHECK (position >= 0),
+        PRIMARY KEY (event_id, observation_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS entities (
+        entity_id       TEXT PRIMARY KEY,
+        entity_type     TEXT NOT NULL CHECK (entity_type = 'vehicle'),
+        attributes_json TEXT NOT NULL,
+        match_level     TEXT NOT NULL CHECK (match_level IN ('coarse_match', 'confirmed')),
+        first_seen      TEXT NOT NULL,
+        first_seen_utc  TEXT NOT NULL,
+        last_seen       TEXT NOT NULL,
+        last_seen_utc   TEXT NOT NULL
+    )
+    """,
+    # An event belongs to at most one entity (UNIQUE event_id).
+    """
+    CREATE TABLE IF NOT EXISTS entity_events (
+        entity_id TEXT NOT NULL REFERENCES entities(entity_id),
+        event_id  TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+        PRIMARY KEY (entity_id, event_id)
+    )
+    """,
+    # Event listings by zone / type over time (M4 rules and M6 questions filter on these).
+    "CREATE INDEX IF NOT EXISTS idx_events_zone_first ON events(zone, first_seen_utc)",
+    "CREATE INDEX IF NOT EXISTS idx_events_type_first ON events(object_type, first_seen_utc)",
+    # Reverse evidence lookup: which events used this observation/frame.
+    "CREATE INDEX IF NOT EXISTS idx_event_obs_observation ON event_observations(observation_id)",
+)
+
+# target schema version -> statements that bring a (version - 1) database up to it
+MIGRATIONS: dict[int, tuple[str, ...]] = {1: _V1, 2: _V2}
+SCHEMA_VERSION = max(MIGRATIONS)

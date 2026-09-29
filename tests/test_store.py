@@ -82,8 +82,11 @@ def test_reopening_existing_database_keeps_data(tmp_path):
 
 
 def test_missing_fts5_is_reported_not_silently_replaced(tmp_path, monkeypatch):
-    broken = (*schema_module.STATEMENTS[:-1], "CREATE VIRTUAL TABLE x USING fts5_missing(a)")
-    monkeypatch.setattr("drone_agent.store.store.STATEMENTS", broken)
+    broken = {
+        **schema_module.MIGRATIONS,
+        1: (*schema_module.MIGRATIONS[1][:-1], "CREATE VIRTUAL TABLE x USING fts5_missing(a)"),
+    }
+    monkeypatch.setattr("drone_agent.store.store.MIGRATIONS", broken)
     with pytest.raises(Fts5UnavailableError):
         Store.open(tmp_path / "nofts.db")
 

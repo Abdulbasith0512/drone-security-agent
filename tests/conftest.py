@@ -6,7 +6,8 @@ import pytest
 from drone_agent.models import Telemetry, Zone
 
 IST = timezone(timedelta(hours=5, minutes=30))
-SCENARIO_DIR = Path(__file__).resolve().parent.parent / "scenarios"
+ROOT = Path(__file__).resolve().parent.parent
+SCENARIO_DIR = ROOT / "scenarios"
 
 
 @pytest.fixture

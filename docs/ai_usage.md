@@ -75,3 +75,41 @@ values near (0, 0); attribute values must be strings (a YAML number such as `pla
 
 **Validation:** `pytest -v` (60 passed), `ruff check .` (clean), `ruff format --check .` (clean), and a manual
 run of `python -m drone_agent simulate scenarios/security_events.yaml`. Tests need no network or API key.
+
+## M2: SQLite persistence, FTS5 search, ingestion and query CLI
+**Tool:** Claude Code (Claude Sonnet 5.5), from my detailed M2 spec.
+
+**What the AI generated:** the schema, the `Store` API (writes, reads, filters, transactions/savepoints),
+the FTS5 query sanitiser, `ingest_result`, the `ingest`/`query` CLI commands, 45 new tests, and the
+architecture/README updates.
+
+**Decisions and where I constrained it (my spec):** stdlib `sqlite3` only, no ORM; FTS5 without embeddings;
+report rather than fall back if FTS5 is missing; Pydantic models kept at the boundary; either idempotent or
+atomic-reject ingestion; events/alerts tables postponed.
+
+**Design decisions the AI made (please review):**
+- Reject duplicates rather than upsert, because an upsert can silently replace stored evidence. This makes `frame_id`
+  a global key, so a database holds one run.
+- `timestamp` (ISO with offset) plus `ts_utc` (fixed-width UTC) columns, because comparing ISO strings with
+  different offsets orders them wrongly.
+- Attributes as canonical JSON, not an attribute table (open-ended keys, read back whole, text search covered by FTS5).
+- The `frames` table has no caption column since observations are 1:1 with frames and the description lives once.
+- FTS5 `porter unicode61` tokenizer, with search words individually quoted and ANDed so user text can never be
+  parsed as FTS5 syntax. Consequence: stemming means "parking" also matches "parked".
+- `query_observations` and `explain_query` share one query builder, so the plan shown is the plan that runs.
+
+**Problems found during validation (honest log)**
+- Three of my first-draft tests were wrong, not the code: I miscounted `main_gate` frames (12, not 17) and person
+  frames (13), and expected "parking" not to match a "parked" vehicle (porter stemming makes it match).
+  `*` alone correctly raises "no searchable words". I corrected the tests to the real, intended behaviour.
+- The object-type query plan is `SCAN o USING INDEX idx_observations_ts` plus a covering-index probe per row.
+  The index is used, but the query is still linear in observation count. I documented that instead of claiming otherwise.
+- Text search results are ranked by BM25, so they are not chronological (visible in the demo output).
+- Review of my own CLI code found a real bug: error messages were printed with Rich markup enabled, so an error
+  that echoes user input such as `[/oops]` (e.g. a bad `zone` value in a scenario) would crash with `MarkupError`.
+  I added `escape()` and a regression test. My first version of that test passed even without the fix, so I
+  rewrote it and confirmed it fails (`MarkupError`) without the fix and passes with it.
+
+**Validation performed:** `pytest -v` (105 passed), `ruff check .` and `ruff format --check .` clean, end-to-end
+`ingest` of `security_events.yaml`, the three query demos, `EXPLAIN QUERY PLAN` inspection, a raw-SQLite check of row counts,
+`PRAGMA foreign_key_check` (no violations) and `PRAGMA integrity_check` (ok). Tests use isolated temp databases, no network and no API key.

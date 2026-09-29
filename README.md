@@ -3,7 +3,7 @@
 Prototype for the FlytBase AI Engineer assignment: a docked-drone security analyst that turns video and
 telemetry into events, deterministic alerts, searchable history and grounded Q&A.
 
-> **Status: M1 (input/domain layer).** Only the `simulate` demo runs; sections below are filled in as milestones land.
+> **Status: M2 (storage and search).** `simulate`, `ingest` and `query` run; events, alerts and Q&A arrive in later milestones.
 
 Design in one line: `FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING`.
 
@@ -22,11 +22,18 @@ pytest
 API keys, if any are ever used, are read from environment variables only (see `.env.example`). Never commit `.env`.
 
 ## Running the demo
-M1 demo (scripted frames + simulated telemetry, no API key, no network):
+No API key and no network are needed. Databases are written under `output/` (gitignored).
 ```
-python -m drone_agent simulate scenarios/security_events.yaml
-python -m drone_agent simulate scenarios/normal_day.yaml
+python -m drone_agent simulate scenarios/security_events.yaml          # scripted frames + telemetry sync
+python -m drone_agent ingest   scenarios/security_events.yaml --db output/security.db
+python -m drone_agent query --db output/security.db --zone main_gate
+python -m drone_agent query --db output/security.db --object person
+python -m drone_agent query --db output/security.db --search "blue pickup"
+python -m drone_agent query --db output/security.db --zone main_gate --explain   # SQLite query plan
 ```
+`query` filters are ANDed and can be combined with `--start/--end` (ISO-8601 with a UTC offset).
+Ingesting the same scenario into the same database twice is rejected and changes nothing; use a new `--db` path.
+Storage design, FTS5 limitations and query plans: [docs/architecture.md](docs/architecture.md).
 Events, alerts and Q&A arrive in later milestones.
 
 ## Design decisions

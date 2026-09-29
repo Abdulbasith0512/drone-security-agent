@@ -24,3 +24,12 @@ def make_telemetry():
         return Telemetry(**data)
 
     return _make
+
+
+@pytest.fixture
+def store(tmp_path):
+    """A fresh, isolated on-disk database per test."""
+    from drone_agent.store import Store
+
+    with Store.open(tmp_path / "test.db") as s:
+        yield s

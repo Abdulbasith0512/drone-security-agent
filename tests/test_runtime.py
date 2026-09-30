@@ -1,6 +1,7 @@
 """Streaming runtime: ticks, pacing, and a live run that ends where the batch pipeline ends."""
 
 import io
+from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
@@ -9,13 +10,13 @@ from rich.console import Console
 
 from drone_agent.agents import PerceptionAgent, SamplerConfig
 from drone_agent.ingest import ingest_result
-from drone_agent.models import AlertStatus, Severity, TransitionKind
+from drone_agent.models import AlertStatus, DetectedObject, Severity, TransitionKind
 from drone_agent.pipeline import build_events
 from drone_agent.rules import analyze
 from drone_agent.runtime import EngineOptions, Pacer, PatrolEngine, RunEventKind, build_ticks
-from drone_agent.runtime.scene import scene_score, signature
+from drone_agent.runtime.scene import DESCRIPTION_ONLY_SCORE, scene_score, signature
 from drone_agent.runtime.view import ASCII, LiveView, LogView, glyphs_for
-from drone_agent.scenario import load_scenario
+from drone_agent.scenario import Scenario, load_scenario
 from drone_agent.simulate import run_scenario
 from drone_agent.store import Store
 from drone_agent.vision import ScriptedProvider
@@ -115,6 +116,117 @@ def test_scene_score_is_zero_for_identical_scenes_and_100_for_disjoint_ones():
     assert scene_score(signature(frames[4]), signature(frames[4])) == 0.0  # both empty
 
 
+def _person(activity):
+    return {
+        "type": "person",
+        "activity": activity,
+        "attributes": {"clothing": "red"},
+        "confidence": 0.9,
+    }
+
+
+def test_scene_signature_sees_activity_changes_and_repeated_identical_objects():
+    def frame(objects):
+        return (
+            load_scenario(SECURITY)
+            .frames[0]
+            .model_copy(update={"objects": [DetectedObject.model_validate(o) for o in objects]})
+        )
+
+    standing = signature(frame([_person("standing")]))
+    running = signature(frame([_person("running")]))
+    two_running = signature(frame([_person("running"), _person("running")]))
+    assert scene_score(standing, running) == 100.0  # same person, new activity
+    assert 0 < scene_score(running, two_running) < 100  # one more identical-looking person
+    assert scene_score(two_running, two_running) == 0.0
+    reworded = signature(frame([_person("running")]).model_copy(update={"description": "New text"}))
+    assert scene_score(running, reworded) == DESCRIPTION_ONLY_SCORE  # same object, new wording
+    assert scene_score(running, running) == 0.0
+
+
+def _dynamic_scenario(frames):
+    """A one-minute main-gate patrol whose frames are (description, [activities]) pairs."""
+    return Scenario.model_validate(
+        {
+            "name": "dynamic",
+            "start": "2026-09-29T23:00:00+05:30",
+            "telemetry": {
+                "seed": 1, "sample_interval_s": 10,
+                "patrol": [{"zone": "main_gate", "duration_s": 60}],
+            },
+            "frames": [
+                {
+                    "frame_id": i, "timestamp_offset": 10 * i, "zone": "main_gate",
+                    "description": description, "objects": [_person(a) for a in activities],
+                }
+                for i, (description, activities) in enumerate(frames, start=1)
+            ],
+        }
+    )  # fmt: skip
+
+
+@contextmanager
+def _sampled_and_unsampled(scenario):
+    with Store.open(":memory:") as sampled, Store.open(":memory:") as unsampled:
+        _, summary, _ = run_engine(scenario, sampled)
+        run_engine(scenario, unsampled, options=EngineOptions(sampler=SamplerConfig(enabled=False)))
+        yield sampled, unsampled, summary
+
+
+def _observation_rows(store):
+    return {
+        o.frame_id: (o.description, sorted((d.activity, d.attributes["clothing"])
+                                           for d in o.detected_objects))
+        for o in store.query_observations()
+    }  # fmt: skip
+
+
+def test_default_sampling_keeps_activity_and_count_changes():
+    """Standing -> running, then one -> two identical people, must reach store and events."""
+    scenario = _dynamic_scenario(
+        [
+            ("Person standing", ["standing"]),
+            ("Person running", ["running"]),
+            ("Two people running", ["running", "running"]),
+            ("Two people running", ["running", "running"]),
+        ]
+    )
+    with _sampled_and_unsampled(scenario) as (sampled, unsampled, summary):
+        rows = _observation_rows(sampled)
+        assert rows[1][1] == [("standing", "red")]  # frame 1
+        assert rows[2][1] == [("running", "red")]  # activity-only change reached the store
+        assert (
+            rows[3][1] == [("running", "red")] * 2
+        )  # the second, identical-looking person is kept
+        assert summary.model_calls == 3  # frame 4 repeats frame 3 exactly, so it is still skipped
+        assert rows == _observation_rows(unsampled)  # sampling on agrees with sampling off
+        events = [(e.event_id, e.activities, e.frame_ids) for e in sampled.query_events()]
+        assert events == [(e.event_id, e.activities, e.frame_ids) for e in unsampled.query_events()]
+        assert {"standing", "running"} <= {a for _, acts, _ in events for a in acts}
+
+
+def test_a_description_change_is_new_evidence_and_is_not_overwritten_by_a_carry():
+    scenario = _dynamic_scenario(
+        [
+            ("Person at the gate", ["standing"]),
+            ("Person at the gate", ["standing"]),  # identical: carried
+            ("Person peering over the gate", ["standing"]),  # same object, new wording
+        ]
+    )
+    with _sampled_and_unsampled(scenario) as (sampled, unsampled, summary):
+        rows = _observation_rows(sampled)
+        assert rows[3][0] == "Person peering over the gate"
+        assert rows == _observation_rows(unsampled)
+        assert summary.model_calls == 2 and summary.skipped == 1
+
+
+def test_unchanged_scripted_frames_still_save_model_calls():
+    scenario = _dynamic_scenario([("Person standing", ["standing"])] * 6)
+    with _sampled_and_unsampled(scenario) as (sampled, unsampled, summary):
+        assert summary.model_calls == 1 and summary.skipped == 5
+        assert _observation_rows(sampled) == _observation_rows(unsampled)
+
+
 # ---- a live run ends where the batch pipeline ends ---------------------------------------------
 @pytest.mark.parametrize("path", [SECURITY, NORMAL], ids=["security_events", "normal_day"])
 def test_streaming_without_sampling_equals_the_batch_pipeline_exactly(path):
@@ -162,7 +274,7 @@ def test_two_runs_of_the_same_scenario_are_identical():
 
 
 # ---- what a live viewer sees ---------------------------------------------------------------------
-def test_the_loitering_alert_is_raised_then_escalated_then_resolved_in_time_order():
+def test_the_loitering_alert_is_raised_then_escalated_in_time_order_and_not_resolved_by_a_move():
     scenario = load_scenario(SECURITY)
     with Store.open(":memory:") as store:
         seen = []
@@ -179,13 +291,15 @@ def test_the_loitering_alert_is_raised_then_escalated_then_resolved_in_time_orde
                 )
 
         PatrolEngine(scenario, store, listener=listener).run()
-    assert [(s[0], s[1]) for s in seen] == [
-        ("raised", "medium"),
-        ("escalated", "critical"),
-        ("resolved", "critical"),
-    ]
-    assert seen[0][2] < seen[1][2] < seen[2][2]
-    assert seen[0][3] and seen[1][3] and not seen[2][3]  # open while it grew, closed at the end
+        event = store.get_event("EVT-P-001")
+        loiter = store.get_alert("ALR-LOITER-EVT-P-001")
+    assert [(s[0], s[1]) for s in seen] == [("raised", "medium"), ("escalated", "critical")]
+    assert seen[0][2] < seen[1][2]
+    assert seen[0][3] and seen[1][3]  # the event was still open while the alert escalated
+    # The event closed because the drone flew to the driveway: coverage ended, departure was not
+    # observed, so nothing resolves the alert.
+    assert event.close_reason.value == "zone_change" and event.departure_observed_at is None
+    assert loiter.status is AlertStatus.ESCALATED and loiter.resolved_at is None
     warning_at = scenario.start + timedelta(seconds=60 + 120)
     assert seen[0][2] == warning_at  # noticed on the first frame after the 120 s threshold
 
@@ -350,9 +464,8 @@ def test_alert_status_marks_in_the_summary_match_the_store():
             by_status[a.status.value] = by_status.get(a.status.value, 0) + 1
         assert by_status == summary.alerts_by_status
         loiter = store.get_alert("ALR-LOITER-EVT-P-001")
-        assert loiter.status is AlertStatus.RESOLVED and loiter.severity is Severity.CRITICAL
+        assert loiter.status is AlertStatus.ESCALATED and loiter.severity is Severity.CRITICAL
         assert [h.kind for h in loiter.history] == [
             TransitionKind.RAISED,
             TransitionKind.ESCALATED,
-            TransitionKind.RESOLVED,
         ]

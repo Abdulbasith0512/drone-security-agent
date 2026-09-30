@@ -11,6 +11,7 @@ Design in one line: `FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING`.
 - [docs/feature_spec.md](docs/feature_spec.md): value, requirements, assumptions, non-goals
 - [docs/architecture.md](docs/architecture.md): pipeline and design
 - [docs/evaluation.md](docs/evaluation.md): experiments, ablations, metrics, threats to validity
+- [docs/real_video_experiment.md](docs/real_video_experiment.md): one real-video Gemini run through the whole pipeline, its findings and limits
 - [docs/ai_usage.md](docs/ai_usage.md): how AI tools were used, and what I changed or rejected
 
 ## Setup (Python 3.11+)
@@ -85,6 +86,12 @@ python -m drone_agent evaluate --output output/eval --scale               # + ti
 Runs the frame-gate ablation, temporal compression, flicker-tolerance and entity-memory ablations (with negative controls), a labelled rule matrix, a citation-gate adversarial suite, a
 citation-valid / semantically-unsupported probe with a prototype structured claim checker, and an optional scale benchmark. Writes `results.json`, `results.csv`, `ablation_table.csv` and `summary.md`
 under `output/eval/` (gitignored). Every number comes from executable code. Results, setup, metrics and threats to validity are in [docs/evaluation.md](docs/evaluation.md); the rule metrics apply only to the controlled synthetic fixtures.
+
+## Real-video experiment
+One 24.68 s real clip (a traffic intersection, not security footage) was run through the full pipeline with Gemini (`gemini-3.6-flash`): 9 sampled frames, 8 accepted by the gate, 8 API calls, 9 observations, 33 objects,
+25 events, 11 coarse vehicle entities and 0 alerts (none of the rules could apply to this clip and simulated time/zone). It validates end-to-end integration on real video; it does NOT measure perception accuracy or
+security performance, which is why the controlled experiments above remain the source of the rule measurements. The clip, cassette and databases stay under `output/real/` (gitignored). Findings (event fragmentation from
+free-text attributes, coarse vehicle linking, the analyst truncation fixed in M8a) and exact commands are in [docs/real_video_experiment.md](docs/real_video_experiment.md).
 
 ## Design decisions
 _TBD (M8). See docs/architecture.md._

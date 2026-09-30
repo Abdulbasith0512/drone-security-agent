@@ -345,3 +345,14 @@ claim checker verdicts, generated observations, scale smoke run and exponent mat
 - The vehicle search still only sees the first 20 entities the tool returns; the answer now says so instead of hiding it. Paging the tool is not implemented.
 - I found that opening ANY database with `Store.open` rewrites its file bytes even for read-only questions (schema initialisation). My three demo questions therefore changed the bytes of `output/real/clip_analysis.db`; I verified its tables are logically identical to a fresh rebuild from the untouched `clip.db`, and the video, cassette and `clip.db` are byte-identical. This existing M2 behaviour is not changed here.
 - The citation gate still cannot detect omission; the notes are what protects the reader.
+
+## M8b: Real-video experiment write-up (documentation only)
+**Tool:** Claude Code (Claude Sonnet 5.5), from my M8b spec. No production code, dependencies, `.env` or real-video artifacts were changed, and no API call was made.
+
+**What the AI wrote:** `docs/real_video_experiment.md` plus a short README section, from the measured results of the completed run. Numbers that could be re-derived were re-checked from the artifacts (clip properties, cassette entries, observation/object/event/entity/alert counts, confidence values, source labels, gate accepted/skipped counts through a free replay).
+
+**Honest notes**
+- The figures 8 API calls, 0 retries and 76.1 s total API latency come from the record run's printed summary as provided; latency and retries are not stored in the cassette or database, so I could not re-derive them. The document says so.
+- Verifying the replay command showed that replayed observations are identical to the recorded run except the `source` label (`cassette` instead of `gemini:gemini-3.6-flash`); this is documented rather than changed.
+- The document deliberately separates what the run validates (end-to-end integration on real video) from what it does not (perception accuracy, security performance).
+

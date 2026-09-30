@@ -60,6 +60,15 @@ def fmt(value: float | int | None, digits: int = 3) -> str:
     return str(value) if isinstance(value, int) else f"{value:.{digits}f}"
 
 
+def f1_score(tp: int, fp: int, fn: int) -> float | None:
+    """F1 = 2TP / (2TP + FP + FN): the harmonic mean of precision and recall.
+
+    It is 0.0 when there are errors but no true positive (going through precision and recall
+    would report N/A there), and None only when nothing was at stake (no TP, FP or FN at all).
+    """
+    return ratio(2 * tp, 2 * tp + fp + fn)
+
+
 @dataclass(frozen=True)
 class Confusion:
     tp: int = 0
@@ -74,6 +83,10 @@ class Confusion:
     @property
     def recall(self) -> float | None:
         return ratio(self.tp, self.tp + self.fn)
+
+    @property
+    def f1(self) -> float | None:
+        return f1_score(self.tp, self.fp, self.fn)
 
     @property
     def accuracy(self) -> float | None:
@@ -92,6 +105,7 @@ class Confusion:
             "fn": self.fn,
             "precision": None if self.precision is None else round(self.precision, 4),
             "recall": None if self.recall is None else round(self.recall, 4),
+            "f1": None if self.f1 is None else round(self.f1, 4),
         }
 
 

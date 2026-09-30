@@ -60,10 +60,26 @@ def test_all_ten_scenarios_ship_with_ground_truth():
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_each_scenario_matches_its_author_written_ground_truth_exactly(name):
+def test_each_scenario_satisfies_its_author_written_ground_truth(name):
+    score = scored(scenario(name))
+    assert score.label_satisfied, score.to_dict()
+    assert score.fp == score.fn == score.forbidden_hits == 0
+
+
+@pytest.mark.parametrize("name", [n for n in NAMES if n != "normal_day"])
+def test_nine_scenarios_match_their_ground_truth_exactly(name):
+    """Nothing was produced beyond the labels: same alerts, events and entities."""
     score = scored(scenario(name))
     assert score.exact, score.to_dict()
-    assert score.fp == score.fn == score.forbidden_hits == 0
+    assert score.events_extra == score.entities_extra == 0
+
+
+def test_normal_day_satisfies_its_labels_but_they_are_a_subset_not_an_exact_match():
+    """Its labels cover 1 of the 5 events and none of the 2 entities the run produces. It used to be
+    reported as exact because surplus events and entities were never counted."""
+    score = scored(scenario("normal_day"))
+    assert score.label_satisfied and not score.exact
+    assert (score.events_extra, score.entities_extra) == (4, 2)
 
 
 def test_the_geometry_and_timing_worked_out_in_advance_are_reproduced():
@@ -309,3 +325,14 @@ def test_render_scores_states_plainly_whether_the_run_matches_and_what_is_unexpe
     out = StringIO()
     render_scores(Console(file=out, width=160), scored(trimmed))
     assert "DIFFERS from ground truth" in out.getvalue() and "unexpected alert" in out.getvalue()
+
+
+def test_f1_is_zero_not_undefined_when_every_prediction_is_wrong():
+    from drone_agent.eval.ground_truth import f1_score
+
+    assert f1_score(0, 1, 1) == 0.0  # one wrong alert and one missed alert
+    assert f1_score(0, 0, 1) == 0.0  # a missed alert and nothing raised
+    assert f1_score(0, 2, 0) == 0.0  # only unexplained alerts
+    assert f1_score(0, 0, 0) is None  # nothing expected, nothing raised: genuinely undefined
+    assert f1_score(3, 1, 0) == pytest.approx(2 * 0.75 / 1.75)
+    assert f1_score(1, 1, 1) == 0.5

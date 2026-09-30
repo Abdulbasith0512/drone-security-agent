@@ -1,4 +1,4 @@
-"""Experiment 9 (RQ9): how do precision, recall and latency degrade when perception is imperfect?
+"""Experiment 11 (RQ10): how do precision, recall and latency degrade when perception is imperfect?
 
 The ground-truth scenarios use perfect scripted detections, so every score there is 1.0 by
 construction. That says the pipeline logic matches its author's intent; it does not say how the
@@ -105,6 +105,7 @@ class Cell:
             "tp": agg["tp"],
             "fp": agg["fp"],
             "fn": agg["fn"],
+            "label_satisfied_rate": (round(agg["label_satisfied_scenarios"] / n, 4) if n else None),
             "exact_rate": round(agg["exact_scenarios"] / n, 4) if n else None,
             "severity_path_accuracy": agg["severity_path_accuracy"],
             "latency_mean_s": agg["detection_latency_s"]["mean"],
@@ -153,8 +154,8 @@ def run(
         interpretation.append(
             f"{kind}: at rate {top['rate']:g} F1 is {fmt(top['f1'])} (precision "
             f"{fmt(top['precision'])}, recall {fmt(top['recall'])}, "
-            f"{top['fp']} FP, {top['fn']} FN); {fmt(top['exact_rate'])} of runs still match their "
-            f"ground truth exactly; lowest F1 in the sweep {fmt(worst[kind]['f1'])} at rate "
+            f"{top['fp']} FP, {top['fn']} FN); {fmt(top['label_satisfied_rate'])} of runs still satisfy "
+            f"their ground-truth labels; lowest F1 in the sweep {fmt(worst[kind]['f1'])} at rate "
             f"{worst[kind]['rate']:g}."
         )
     interpretation.append(
@@ -165,7 +166,7 @@ def run(
     return ExperimentResult(
         key="noise",
         title="Perception-noise sweep: how precision, recall and F1 degrade",
-        research_question="RQ9: when perception is imperfect, which failure mode hurts the "
+        research_question="RQ10: when perception is imperfect, which failure mode hurts the "
         "deterministic pipeline most, and how gracefully?",
         definition=(
             f"{len(scenarios)} ground-truth scenarios x rates {list(rates)} x {seeds} seeds x "

@@ -1,4 +1,4 @@
-"""Experiment 8 (RQ8): adaptive VLM sampling versus a pixel gate, at what cost and with what misses.
+"""Experiment 10 (RQ9): adaptive VLM sampling versus a pixel gate, at what cost and with what misses.
 
 A pixel gate saves model calls but is blind to small changes (the earlier gate experiment: 5 of 40
 frames sent, 2 of 4 meaningful changes seen). The obvious cheap fix is "also refresh every N
@@ -303,7 +303,7 @@ def run(seeds: tuple[int, ...] = SEEDS) -> ExperimentResult:
     return ExperimentResult(
         key="sampler",
         title="Adaptive sampling versus a pixel gate: calls saved AND changes missed",
-        research_question="RQ8: does combining pixel change, telemetry change, event state and a "
+        research_question="RQ9: does combining pixel change, telemetry change, event state and a "
         "staleness bound detect more meaningful changes per model call than a pixel gate, "
         "including a pixel gate with a fixed refresh?",
         definition=(

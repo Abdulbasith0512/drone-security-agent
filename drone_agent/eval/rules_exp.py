@@ -1,10 +1,17 @@
 """Experiment 5 (RQ5): rule correctness on a labelled scenario matrix (controlled fixtures only).
 
-Each scenario is authored with expected alert counts per rule. Every (scenario, rule) pair is one
+Each scenario is authored with expected alert COUNTS per rule. Every (scenario, rule) pair is one
 cell. Counts: matched alerts are TP, surplus alerts FP, missing alerts FN, and a cell where both
-expectation and result are empty is one TN. A zero denominator is reported as N/A. These numbers
-describe agreement with hand-labelled synthetic fixtures; they are NOT real-world precision or
-recall. No LLM is involved.
+expectation and result are empty is one TN. Precision, recall and F1 (2TP / (2TP + FP + FN)) are N/A
+when their denominator is zero. These numbers describe agreement with hand-labelled synthetic
+fixtures; they are NOT real-world precision or recall. No LLM is involved.
+
+What a scenario "match" means here, exactly: for each of the four camera rules the NUMBER of alerts
+equals the authored number, and no alert came from any other rule. It does not check WHICH event
+raised an alert, its severity, its timing or its status (the ground-truth scenarios in
+eval/ground_truth.py score those), it runs the batch pipeline on scripted observations only (no
+telemetry, so the four drone-safety rules cannot fire), and a surplus alert in one cell cannot
+cancel a missing alert in another because every cell is compared on its own.
 """
 
 from dataclasses import dataclass, field
@@ -203,12 +210,15 @@ def evaluate_scenario(sc: Scenario) -> dict:
     actual = {r: sum(1 for a in alerts if a.rule_id == r) for r in RULES}
     expected = {r: sc.expected.get(r, 0) for r in RULES}
     cells = {r: count_confusion(expected[r], actual[r]) for r in RULES}
+    # an alert from a rule this matrix does not list is an unexplained alert, not a non-event
+    unlisted = sorted(a.rule_id for a in alerts if a.rule_id not in RULES)
     return {
         "scenario": sc.name,
         "purpose": sc.purpose,
         "expected": expected,
         "actual": actual,
-        "exact_match": expected == actual,
+        "unlisted_rule_alerts": unlisted,
+        "counts_match": expected == actual and not unlisted,
         "cells": {r: c.to_dict() for r, c in cells.items()},
     }
 
@@ -244,7 +254,7 @@ def run() -> ExperimentResult:
         _, _, alerts = run_pipeline(scenario_observations(name))
         actual = {r: sum(1 for a in alerts if a.rule_id == r) for r in RULES}
         dev[name] = {"expected": {r: expected.get(r, 0) for r in RULES}, "actual": actual}
-    mismatches = [r["scenario"] for r in results if not r["exact_match"]]
+    mismatches = [r["scenario"] for r in results if not r["counts_match"]]
     rows = [
         {
             "experiment": "rules",
@@ -255,17 +265,20 @@ def run() -> ExperimentResult:
             "fn": c["fn"],
             "precision": c["precision"],
             "recall": c["recall"],
+            "f1": c["f1"],
         }
         for r, c in per_rule.items()
     ]
     interpretation = [
         f"On the {len(matrix)} labelled scenarios ({len(matrix) * len(RULES)} scenario-rule cells) "
-        f"the rules matched the labels exactly in {len(matrix) - len(mismatches)} scenarios; "
-        f"mismatching scenarios: {mismatches or 'none'}.",
-        "Per rule (TP/FP/TN/FN, precision, recall): "
+        f"the alert COUNTS per rule matched the labels in {len(matrix) - len(mismatches)} "
+        f"scenarios (every one of the {len(RULES)} camera rules, with no alert from any other "
+        f"rule); mismatching scenarios: {mismatches or 'none'}. This is count agreement: it does "
+        "not check which event raised an alert, its severity, timing or status.",
+        "Per rule (TP/FP/TN/FN, precision, recall, F1): "
         + "; ".join(
             f"{r} {c['tp']}/{c['fp']}/{c['tn']}/{c['fn']} P={fmt(c['precision'])} "
-            f"R={fmt(c['recall'])}"
+            f"R={fmt(c['recall'])} F1={fmt(c['f1'])}"
             for r, c in per_rule.items()
         )
         + ". N/A means a zero denominator.",

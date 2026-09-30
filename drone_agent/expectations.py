@@ -98,3 +98,8 @@ class Expectations(DomainModel):
     # Alerts the scenario does not label at all are treated as false positives unless a rule id
     # is listed here (e.g. a side effect the author deliberately does not score).
     unscored_rules: list[str] = Field(default_factory=list)
+    # Alerts are always scored exhaustively (an unlabelled alert is a false positive). Events and
+    # entities are SUBSET labels by default: "these must exist", and extra ones are reported but not
+    # an error. Set this to declare the event and entity labels COMPLETE, so that any unlabelled
+    # event or entity makes the scenario fail.
+    exhaustive: bool = False

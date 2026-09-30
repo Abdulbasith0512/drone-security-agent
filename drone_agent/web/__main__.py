@@ -20,7 +20,7 @@ from drone_agent.video import VideoError
 from drone_agent.web.api import DashboardApi, open_readonly
 from drone_agent.web.bundle import BundleError, build_demo_runs
 from drone_agent.web.registry import RegistryError, Run, RunRegistry, parse_run_spec
-from drone_agent.web.server import LOOPBACK_HOSTS, make_server
+from drone_agent.web.server import LOOPBACK_HOSTS, STATIC_DIR, STATIC_FILES, make_server
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +54,14 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
     args = build_parser().parse_args(argv)
     if not args.demo and not args.run:
         console.print("[red]error:[/red] give --demo and/or at least one --run")
+        return 2
+    missing = [name for name, _ in STATIC_FILES.values() if not (STATIC_DIR / name).is_file()]
+    if missing:
+        console.print(
+            f"[red]error:[/red] the dashboard UI files are missing from {STATIC_DIR}: "
+            f"{', '.join(missing)}. Run from a full clone of the repository "
+            "(the UI lives in the top-level frontend/ folder)."
+        )
         return 2
     try:
         runs: list[Run] = []

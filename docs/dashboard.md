@@ -13,13 +13,14 @@ are both stored with the source label `cassette`, so the stored label cannot tel
 
 ## Architecture
 ```
-browser (static/index.html, app.js, app.css)          presentation only: fetch, lay out, cross-link
+browser (frontend/index.html, app.js, app.css)         presentation only: fetch, lay out, cross-link
    |  JSON over http://127.0.0.1
 drone_agent/web/server.py     stdlib http.server: fixed routes, static whitelist, Host/Origin checks, body caps, CSP
 drone_agent/web/api.py        thin adapter: calls existing code and reshapes it for JSON
    |
 Store | AnalystTools | AnalystSession | run_facts | VideoSource | rules config     (existing, unmodified)
 ```
+The UI files live in the top-level [`frontend/`](../frontend/) folder; a map of the backend code is in [`backend/README.md`](../backend/README.md).
 Other modules: `registry.py` (declared run kinds), `bundle.py` (`--demo`: runs the existing CLI commands in-process), `frames.py` (JPEG of a
 video frame), `guard.py` (question filter, below), `__main__.py` (entry point).
 

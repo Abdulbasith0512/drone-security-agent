@@ -225,22 +225,16 @@ def test_post_only_works_on_the_ask_route_and_needs_a_length(server):
     assert status_without_content_length(server) == 411
 
 
-def status_without_content_length(server, attempts=4):
-    """A POST with no Content-Length, sent by hand. Windows can abort a connection that the server
-    closes right after replying when the machine is busy; that is transport noise, so the check
-    is repeated a few times and only the HTTP status matters."""
-    for attempt in range(attempts):
-        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
-        try:
-            conn.putrequest("POST", f"/api/runs/{SCRIPTED}/ask")
-            conn.putheader("Content-Type", "application/json")
-            conn.endheaders()
-            return conn.getresponse().status
-        except ConnectionError:
-            if attempt == attempts - 1:
-                raise
-        finally:
-            conn.close()
+def status_without_content_length(server):
+    """A POST with no Content-Length, sent by hand."""
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        conn.putrequest("POST", f"/api/runs/{SCRIPTED}/ask")
+        conn.putheader("Content-Type", "application/json")
+        conn.endheaders()
+        return conn.getresponse().status
+    finally:
+        conn.close()
 
 
 # ---- Host / Origin / methods ---------------------------------------------------------------------
@@ -291,7 +285,9 @@ def test_serving_every_route_leaves_the_databases_unchanged(server, runs):
 
 # ---- the page itself holds no detection logic ------------------------------------------
 def page_sources() -> dict[str, str]:
-    return {p.name: p.read_text(encoding="utf-8") for p in STATIC_DIR.iterdir() if p.is_file()}
+    return {
+        name: (STATIC_DIR / name).read_text(encoding="utf-8") for name, _ in STATIC_FILES.values()
+    }
 
 
 def test_javascript_contains_no_rule_ids_thresholds_or_detection_logic():
@@ -340,3 +336,75 @@ def test_the_page_has_the_five_required_panels_and_the_pipeline():
     ):
         assert f'id="{panel}"' in html
     assert 'id="pipeline"' in html and 'id="kind-banner"' in html
+
+
+# ---- rejected requests that carry a body must still get their reply ------------------
+REJECTED_WITH_BODY = [
+    ("POST", "/api/runs", {"Content-Type": "application/json"}, 404),
+    ("POST", f"/api/runs/{SCRIPTED}/alerts", {"Content-Type": "application/json"}, 404),
+    ("POST", f"/api/runs/{SCRIPTED}/ask", {"Content-Type": "text/plain"}, 415),
+    (
+        "POST",
+        f"/api/runs/{SCRIPTED}/ask",
+        {"Content-Type": "application/json", "Host": "evil.example"},
+        403,
+    ),
+    (
+        "POST",
+        f"/api/runs/{SCRIPTED}/ask",
+        {"Content-Type": "application/json", "Origin": "http://evil.example"},
+        403,
+    ),
+    ("PUT", "/api/runs", {"Content-Type": "application/json"}, 405),
+    ("DELETE", "/api/runs", {"Content-Type": "application/json"}, 405),
+]
+
+
+def test_a_rejected_request_with_a_body_still_receives_its_reply_every_time(server):
+    """The server used to reply to these without reading the body; closing the socket with unread
+    data made Windows reset the connection, so the client sometimes got an abort instead of the
+    404/415/403/405. The body is now read (and dropped) first, so the reply is reliable."""
+    body = b'{"question": "' + b"x" * 2000 + b'"}'
+    for method, path, headers, expected in REJECTED_WITH_BODY:
+        seen = set()
+        for _ in range(60):
+            status, _, _ = request(server, method, path, body=body, headers=headers)
+            seen.add(status)
+        assert seen == {expected}, (method, path, seen)
+
+
+def test_an_oversized_body_is_answered_with_413_not_a_reset(server):
+    for _ in range(20):
+        status, _, _ = request(
+            server,
+            "POST",
+            f"/api/runs/{SCRIPTED}/ask",
+            body=b"x" * (MAX_BODY_BYTES * 3),
+            headers={"Content-Type": "application/json"},
+        )
+        assert status == 413
+
+
+def test_a_client_that_promises_a_body_and_never_sends_it_is_cut_off(runs, monkeypatch):
+    import socket
+    import time
+
+    from drone_agent.web.server import DashboardHandler
+
+    monkeypatch.setattr(DashboardHandler, "timeout", 0.4)
+    httpd = make_server(DashboardApi(RunRegistry(runs)), "127.0.0.1", 0, quiet=True)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        sock = socket.create_connection(("127.0.0.1", httpd.server_port), timeout=5)
+        sock.sendall(
+            f"POST /api/runs/{SCRIPTED}/ask HTTP/1.0\r\nHost: 127.0.0.1:{httpd.server_port}\r\n"
+            "Content-Type: application/json\r\nContent-Length: 500\r\n\r\n".encode()
+        )
+        started = time.monotonic()
+        reply = sock.recv(4096)
+        assert time.monotonic() - started < 3  # answered after the short timeout, not hung
+        assert reply.startswith(b"HTTP/1.0 400") or reply == b""
+        sock.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

@@ -13,6 +13,7 @@ Design in one line: `FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING`. **Ru
 - [docs/real_video_experiment.md](docs/real_video_experiment.md): one real-video Gemini run through the whole pipeline, its findings and limits
 - [docs/ai_usage.md](docs/ai_usage.md): how AI tools were used, and what I changed or rejected
 - [docs/dashboard.md](docs/dashboard.md): the evaluator dashboard: panels, API, what feeds each panel, safety limits
+- [frontend/README.md](frontend/README.md) and [backend/README.md](backend/README.md): where the UI and the backend code live
 
 ## Setup (Python 3.11+)
 ```
@@ -77,6 +78,18 @@ python -m drone_agent.web --demo          # builds the offline demo runs into ou
 (**SYNTHETIC DEMO**: real pixels, canned descriptions, not a vision model). To add your own run, declare what it is (the kind is never guessed):
 `python -m drone_agent.web --run NAME=DB,kind=scripted|synthetic-demo|real-video[,video=PATH]`. The one real-video experiment (**REAL VIDEO**) is not in the repository (the clip is gitignored); on a machine that has it, register it with `--run`.
 No new dependencies and no Node/npm: a Python standard-library server plus plain HTML/CSS/JS, bound to localhost only. What each panel shows and which existing function feeds it: [docs/dashboard.md](docs/dashboard.md).
+
+### Where the frontend and backend are
+| | Location |
+|---|---|
+| **Frontend** (the UI: `index.html`, `app.js`, `app.css`) | [`frontend/`](frontend/), see [frontend/README.md](frontend/README.md) |
+| **Backend** (pipeline, rules, store, analyst, CLI) | the Python package [`drone_agent/`](drone_agent/), mapped file by file in [backend/README.md](backend/README.md) |
+| **Dashboard server** (serves the frontend, read-only JSON API) | [`drone_agent/web/`](drone_agent/web/) |
+
+```
+frontend/    UI (plain HTML/CSS/JS)          backend/    guide to the backend code
+drone_agent/ Python backend + dashboard server (web/)     tests/  docs/  config/  scenarios/  bench/
+```
 
 ## Architecture overview
 Scripted text frames or a real video (sampled, pixel-gated, described by Gemini or a cassette) become **observations** joined to simulated telemetry, indexed in **SQLite + FTS5**. An

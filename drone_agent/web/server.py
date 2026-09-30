@@ -18,8 +18,13 @@ from drone_agent.web.frames import DEFAULT_WIDTH
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 MAX_BODY_BYTES = 8 * 1024
+DRAIN_LIMIT = (
+    64 * 1024
+)  # most of a rejected request body that is read (and dropped) before replying
+REQUEST_TIMEOUT_S = 15  # a client that stalls mid-request is cut off
 MAX_QUERY_CHARS = 512
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+# the UI is a plain HTML/CSS/JS folder at the repository root: <repo>/frontend
+STATIC_DIR = Path(__file__).resolve().parents[2] / "frontend"
 STATIC_FILES = {  # the only files ever served, by exact URL path
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -56,6 +61,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     api: DashboardApi
     quiet = False
     server_version = "DroneDashboard/1"
+    timeout = REQUEST_TIMEOUT_S  # socket timeout for reading the request
 
     # ---- responses ---------------------------------------------------------------------------
     def _send(self, status: int, body: bytes, content_type: str, *, no_store: bool = True) -> None:
@@ -172,7 +178,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, data, "image/jpeg", no_store=False)
 
     # ---- POST --------------------------------------------------------------------------------
+    def _declared_length(self) -> int | None:
+        try:
+            return int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return None
+
+    def _read_body(self) -> bytes:
+        """Read what the client declared (at most DRAIN_LIMIT) BEFORE replying, whatever the reply.
+
+        Closing a socket that still holds unread request data makes Windows reset the connection,
+        and the client then loses the reply (a 404, 415, 403 or 413 would arrive as an abort).
+        """
+        length = self._declared_length()
+        if length is None or length <= 0:
+            return b""
+        try:
+            return self.rfile.read(min(length, DRAIN_LIMIT))
+        except TimeoutError:  # the client promised a body and never sent it
+            self.close_connection = True
+            return b""
+
     def do_POST(self) -> None:
+        length = self._declared_length()
+        raw = self._read_body()
         if not self._headers_ok():
             return
         parts = urlsplit(self.path)
@@ -183,9 +212,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if "application/json" not in self.headers.get("Content-Type", ""):
             self._error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "send application/json")
             return
-        try:
-            length = int(self.headers.get("Content-Length", ""))
-        except ValueError:
+        if length is None:
             self._error(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required")
             return
         if length < 0 or length > MAX_BODY_BYTES:
@@ -194,7 +221,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            body = json.loads(self.rfile.read(length) or b"null")
+            body = json.loads(raw or b"null")
         except (ValueError, UnicodeDecodeError):
             self._error(HTTPStatus.BAD_REQUEST, "body must be valid JSON")
             return
@@ -216,6 +243,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal error")
 
     def _method_not_allowed(self) -> None:
+        self._read_body()
         self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
         self.send_header("Allow", "GET, HEAD, POST")
         self.send_header("Content-Length", "0")

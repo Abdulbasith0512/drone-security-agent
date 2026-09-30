@@ -1,0 +1,357 @@
+{
+  "contract_version": "1",
+  "entries": [
+    {
+      "content_hash": "614f82ff975a128d",
+      "frame_index": 0,
+      "key": "d7e3ceeba55902be:0",
+      "offset_seconds": 0.0,
+      "output": {
+        "description": "A high-angle view of an urban intersection with moving vehicles and pedestrians near pedestrian crossings.",
+        "objects": [
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "van",
+              "color": "black"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          },
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "van",
+              "color": "white"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          },
+          {
+            "activity": "riding",
+            "attributes": {
+              "body_type": "motorcycle",
+              "color": "dark"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          },
+          {
+            "activity": "standing",
+            "attributes": {
+              "clothing": "dark clothing"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "walking",
+            "attributes": {
+              "clothing": "dark coat"
+            },
+            "confidence": null,
+            "type": "person"
+          }
+        ]
+      }
+    },
+    {
+      "content_hash": "aa4bde36b4495353",
+      "frame_index": 75,
+      "key": "d7e3ceeba55902be:75",
+      "offset_seconds": 3.0,
+      "output": {
+        "description": "An elevated view of a street intersection shows a person crossing the road and pedestrians standing near a pedestrian island while a white flatbed truck drives past.",
+        "objects": [
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "flatbed truck",
+              "color": "white"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          },
+          {
+            "activity": "walking",
+            "attributes": {
+              "clothing": "dark jacket, dark pants"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "standing",
+            "attributes": {
+              "clothing": "dark coat, blue jeans"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "standing",
+            "attributes": {
+              "clothing": "dark jacket, blue jeans"
+            },
+            "confidence": null,
+            "type": "person"
+          }
+        ]
+      }
+    },
+    {
+      "content_hash": "6b85376743f4e51e",
+      "frame_index": 150,
+      "key": "d7e3ceeba55902be:150",
+      "offset_seconds": 6.0,
+      "output": {
+        "description": "A high-angle view shows pedestrians crossing a street at a pedestrian crossing while a white SUV drives past a refuge island.",
+        "objects": [
+          {
+            "activity": "walking",
+            "attributes": {
+              "clothing": "dark long coat"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "walking",
+            "attributes": {
+              "clothing": "dark jacket and blue jeans"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "walking",
+            "attributes": {
+              "clothing": "dark jacket"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "SUV",
+              "color": "white"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          },
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "truck",
+              "color": "white"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          }
+        ]
+      }
+    },
+    {
+      "content_hash": "47f0a07354e089ea",
+      "frame_index": 225,
+      "key": "d7e3ceeba55902be:225",
+      "offset_seconds": 9.0,
+      "output": {
+        "description": "A high-angle view of an urban intersection shows a white box truck moving past a pedestrian island with a person standing on it and pedestrians walking nearby.",
+        "objects": [
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "box truck",
+              "color": "white"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          },
+          {
+            "activity": "standing",
+            "attributes": {
+              "clothing": "dark suit"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "walking",
+            "attributes": {
+              "clothing": "dark jacket"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "walking",
+            "attributes": {
+              "clothing": "dark jacket"
+            },
+            "confidence": null,
+            "type": "person"
+          }
+        ]
+      }
+    },
+    {
+      "content_hash": "c569ecaf905475a0",
+      "frame_index": 300,
+      "key": "d7e3ceeba55902be:300",
+      "offset_seconds": 12.0,
+      "output": {
+        "description": "An elevated view of a street intersection where a pedestrian stands on a traffic refuge island while vehicles drive nearby.",
+        "objects": [
+          {
+            "activity": "standing",
+            "attributes": {
+              "clothing": "dark clothing"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "hatchback",
+              "color": "white"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          },
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "car",
+              "color": "blue"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          }
+        ]
+      }
+    },
+    {
+      "content_hash": "fe9b9d111f9ccc74",
+      "frame_index": 375,
+      "key": "d7e3ceeba55902be:375",
+      "offset_seconds": 15.0,
+      "output": {
+        "description": "A drone view of a street intersection where an ambulance and a blue car drive past a pedestrian standing on a safety island.",
+        "objects": [
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "van",
+              "color": "white"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          },
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "hatchback",
+              "color": "blue"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          },
+          {
+            "activity": "standing",
+            "attributes": {
+              "clothing": "dark attire"
+            },
+            "confidence": null,
+            "type": "person"
+          }
+        ]
+      }
+    },
+    {
+      "content_hash": "766b49f634c15f05",
+      "frame_index": 450,
+      "key": "d7e3ceeba55902be:450",
+      "offset_seconds": 18.0,
+      "output": {
+        "description": "A high-angle view shows vehicles driving through a street intersection while a pedestrian stands on a central refuge island.",
+        "objects": [
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "SUV",
+              "color": "silver"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          },
+          {
+            "activity": "standing",
+            "attributes": {
+              "clothing": "dark jacket and dark trousers"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "van",
+              "color": "white"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          }
+        ]
+      }
+    },
+    {
+      "content_hash": "1b87cfc7e18042b0",
+      "frame_index": 600,
+      "key": "d7e3ceeba55902be:600",
+      "offset_seconds": 24.0,
+      "output": {
+        "description": "A high-angle view shows a street intersection with a pedestrian island where a person stands, alongside a cyclist and a driving car.",
+        "objects": [
+          {
+            "activity": "standing",
+            "attributes": {
+              "clothing": "dark jacket and dark pants"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "riding a bicycle",
+            "attributes": {
+              "clothing": "dark jacket and dark pants"
+            },
+            "confidence": null,
+            "type": "person"
+          },
+          {
+            "activity": "driving",
+            "attributes": {
+              "body_type": "hatchback",
+              "color": "dark grey"
+            },
+            "confidence": null,
+            "type": "vehicle"
+          }
+        ]
+      }
+    }
+  ],
+  "format": "drone-agent-cassette/1",
+  "provider": "gemini:gemini-3.6-flash",
+  "video": {
+    "fps": 25.0,
+    "frame_count": 617,
+    "height": 1080,
+    "name": "clip.mp4",
+    "sha256": "d7e3ceeba55902bee5f6c9efbe68c8799266e699c7c5cb2d1a7180bcc7027ea2",
+    "width": 1920
+  }
+}

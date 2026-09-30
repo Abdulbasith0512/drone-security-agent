@@ -4,8 +4,9 @@
     python -m drone_agent.web --run mine=output/security.db,kind=scripted
     python -m drone_agent.web --run clip=output/real/clip.db,kind=real-video,video=clip.mp4
 
-Offline and read-only: no model, no network, no API key. `--demo` rebuilds the two demo runs with
-the existing CLI commands.
+Offline and read-only: no model, no network, no API key. `--demo` rebuilds three runs with the
+existing CLI commands: the bundled real clip (first, so it is what opens) replayed from its recorded
+vision-model answers, then the scripted run and the synthetic-video run.
 
 Public hosting (opt-in), for example as a single Render web service:
 
@@ -27,7 +28,7 @@ from rich.console import Console
 from drone_agent.store import StoreError
 from drone_agent.video import VideoError
 from drone_agent.web.api import DashboardApi, open_readonly
-from drone_agent.web.bundle import BundleError, build_demo_runs
+from drone_agent.web.bundle import BundleError, build_demo_runs, build_real_run
 from drone_agent.web.registry import RegistryError, Run, RunRegistry, parse_run_spec
 from drone_agent.web.server import (
     LOOPBACK_HOSTS,
@@ -114,6 +115,7 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
         runs: list[Run] = []
         if args.demo:
             console.print("Building the offline demo runs (existing CLI commands, no model) ...")
+            runs.append(build_real_run(args.out_dir, rebuild=args.rebuild))  # first: the default
             runs += build_demo_runs(args.out_dir, rebuild=args.rebuild)
         runs += [parse_run_spec(spec) for spec in args.run]
         registry = RunRegistry(runs)

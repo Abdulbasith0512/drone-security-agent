@@ -47,6 +47,8 @@ runs/
 *.avi
 *.mkv
 *.webm
+# the one bundled demo clip (exact bytes, pinned by sha256 in demo_assets/real_clip/manifest.json)
+!demo_assets/real_clip/clip.mp4
 
 # --- Editor/OS ---
 .vscode/

@@ -1,0 +1,27 @@
+{
+  "format": "drone-agent-demo-asset/1",
+  "purpose": "the real-video dashboard demo: real pixels plus a RECORDED vision-model replay; no model is called",
+  "clip": {
+    "file": "clip.mp4",
+    "size_bytes": 10797538,
+    "sha256": "d7e3ceeba55902bee5f6c9efbe68c8799266e699c7c5cb2d1a7180bcc7027ea2",
+    "width": 1920,
+    "height": 1080,
+    "fps": 25.0,
+    "frame_count": 617,
+    "duration_seconds": 24.68
+  },
+  "cassette": {
+    "file": "clip.cassette.json",
+    "size_bytes": 10229,
+    "sha256": "a8715a8419242077ad767a94390d6fca0a86b3bd057f70a33a04562dfd4c758b",
+    "provider": "gemini:gemini-3.6-flash",
+    "entries": 8
+  },
+  "replay": {
+    "start": "2026-09-29T14:00:00+05:30",
+    "zone": "main_gate",
+    "sample_every_seconds": 3,
+    "simulated": "start time, zone and telemetry are supplied here; a video carries none"
+  }
+}

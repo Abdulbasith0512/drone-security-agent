@@ -1,0 +1,2 @@
+# The bundled demo assets are pinned by sha256: never convert line endings or otherwise touch them.
+demo_assets/** -text

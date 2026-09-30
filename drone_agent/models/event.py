@@ -12,6 +12,12 @@ class CloseReason(StrEnum):
     MISSED_FRAMES = "missed_frames"  # too many consecutive frames in the zone without a match
     ZONE_CHANGE = "zone_change"  # the drone observed a different zone
     SCENARIO_END = "scenario_end"  # input ended while the event was still open
+    OPEN = "open"  # streaming snapshot: the event is still being extended
+
+    @property
+    def object_departed(self) -> bool:
+        """Was the object actually no longer seen (as opposed to the input just ending)?"""
+        return self in (CloseReason.GAP, CloseReason.MISSED_FRAMES, CloseReason.ZONE_CHANGE)
 
 
 class Event(DomainModel):
@@ -31,6 +37,9 @@ class Event(DomainModel):
     close_reason: CloseReason
     # Set by the entity linker (vehicles only); never links people.
     entity_id: str | None = None
+    # Mean detection confidence over the detections merged into this event. Providers that report
+    # none contribute the documented placeholder, so this is not a calibrated probability.
+    confidence: float | None = Field(default=None, ge=0, le=1)
 
     @property
     def duration_seconds(self) -> float:
@@ -40,6 +49,10 @@ class Event(DomainModel):
     @property
     def evidence_count(self) -> int:
         return len(self.observation_ids)
+
+    @property
+    def is_open(self) -> bool:
+        return self.close_reason is CloseReason.OPEN
 
     @model_validator(mode="after")
     def _consistent(self) -> "Event":

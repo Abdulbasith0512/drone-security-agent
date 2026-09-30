@@ -1,22 +1,32 @@
-"""Persistence of derived data: events, their evidence links, and entities (schema v2).
+"""Persistence of derived data: events, their evidence links, entities and alerts.
 
-Everything here is regenerable from observations, so it is written with replace semantics
-(`replace_derived`), unlike ingested observations which are rejected if duplicated.
+Two write styles share the same row encoders:
+
+* Batch (`replace_derived`, `replace_alerts`): everything here is regenerable from observations,
+  so it is written with replace semantics.
+* Streaming (`save_events`, `save_entities`, `save_alert`): a run persists events while they are
+  still open and alerts as their lifecycle advances, so rows are upserted, never deleted, and the
+  foreign keys from alerts to events stay valid throughout.
 """
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from datetime import datetime
 
 from drone_agent.models import (
     Alert,
+    AlertStatus,
+    AlertTransition,
     CloseReason,
     Entity,
     Event,
+    LadderStep,
     MatchLevel,
     ObjectType,
     Observation,
     Severity,
+    Verdict,
     Zone,
 )
 from drone_agent.store.codec import canonical_json, utc_key
@@ -24,13 +34,17 @@ from drone_agent.store.errors import StoreError, translate_integrity_error
 
 _IN_CHUNK = 500
 
+# An OPEN event keeps this placeholder in `close_reason` (which has its own CHECK); the real
+# discriminator is the `status` column.
+_OPEN_PLACEHOLDER = CloseReason.SCENARIO_END.value
+
 
 class DerivedMixin:
-    """Event/entity methods of `Store` (uses Store's `_conn` and `transaction`)."""
+    """Event/entity/alert methods of `Store` (uses Store's `_conn` and `transaction`)."""
 
     _conn: sqlite3.Connection
 
-    # ---- writes ----------------------------------------------------------------------------
+    # ---- batch writes ----------------------------------------------------------------------
     def replace_derived(self, events: list[Event], entities: list[Entity]) -> tuple[int, int, int]:
         """Atomically replace ALL stored events and entities.
 
@@ -64,6 +78,8 @@ class DerivedMixin:
         """Delete all alerts, events, evidence links and entities (children first)."""
         with self.transaction():  # type: ignore[attr-defined]
             tables = (
+                "alert_history",
+                "alert_telemetry",
                 "alert_events",
                 "alerts",
                 "entity_events",
@@ -74,24 +90,34 @@ class DerivedMixin:
             for table in tables:
                 self._conn.execute(f"DELETE FROM {table}")
 
+    _EVENT_COLUMNS = (
+        "event_id, object_type, zone, first_seen, first_seen_utc, last_seen, last_seen_utc,"
+        " attributes_json, activities_json, description, close_reason, status, confidence"
+    )
+
+    @staticmethod
+    def _event_row(ev: Event) -> tuple:
+        opened = ev.is_open
+        return (
+            ev.event_id,
+            ev.object_type.value,
+            ev.zone.value,
+            ev.first_seen.isoformat(),
+            utc_key(ev.first_seen),
+            ev.last_seen.isoformat(),
+            utc_key(ev.last_seen),
+            canonical_json(ev.attributes),
+            json.dumps(ev.activities, ensure_ascii=False),
+            ev.description,
+            _OPEN_PLACEHOLDER if opened else ev.close_reason.value,
+            "open" if opened else "closed",
+            ev.confidence,
+        )
+
     def _insert_event(self, ev: Event) -> None:
         self._conn.execute(
-            "INSERT INTO events (event_id, object_type, zone, first_seen, first_seen_utc,"
-            " last_seen, last_seen_utc, attributes_json, activities_json, description,"
-            " close_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                ev.event_id,
-                ev.object_type.value,
-                ev.zone.value,
-                ev.first_seen.isoformat(),
-                utc_key(ev.first_seen),
-                ev.last_seen.isoformat(),
-                utc_key(ev.last_seen),
-                canonical_json(ev.attributes),
-                json.dumps(ev.activities, ensure_ascii=False),
-                ev.description,
-                ev.close_reason.value,
-            ),
+            f"INSERT INTO events ({self._EVENT_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            self._event_row(ev),
         )
         self._conn.executemany(
             "INSERT INTO event_observations (event_id, observation_id, position) VALUES (?, ?, ?)",
@@ -101,8 +127,8 @@ class DerivedMixin:
     def _insert_entity(self, ent: Entity) -> None:
         self._conn.execute(
             "INSERT INTO entities (entity_id, entity_type, attributes_json, match_level,"
-            " first_seen, first_seen_utc, last_seen, last_seen_utc)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " first_seen, first_seen_utc, last_seen, last_seen_utc, match_score)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ent.entity_id,
                 ent.entity_type.value,
@@ -112,14 +138,99 @@ class DerivedMixin:
                 utc_key(ent.first_seen),
                 ent.last_seen.isoformat(),
                 utc_key(ent.last_seen),
+                ent.match_score,
             ),
         )
+        self._insert_entity_links(ent)
+
+    def _insert_entity_links(self, ent: Entity) -> None:
         self._conn.executemany(
-            "INSERT INTO entity_events (entity_id, event_id) VALUES (?, ?)",
-            [(ent.entity_id, eid) for eid in ent.event_ids],
+            "INSERT INTO entity_events (entity_id, event_id, link_score, link_components_json)"
+            " VALUES (?, ?, ?, ?)",
+            [
+                (
+                    ent.entity_id,
+                    eid,
+                    ent.link_scores.get(eid),
+                    canonical_json(ent.link_components[eid])
+                    if eid in ent.link_components
+                    else None,
+                )
+                for eid in ent.event_ids
+            ],
         )
 
-    # ---- reads -----------------------------------------------------------------------------
+    # ---- streaming writes ------------------------------------------------------------------
+    def save_events(self, events: Iterable[Event]) -> None:
+        """Insert or update events (open or closed) and their evidence links, in place.
+
+        Uses an upsert, not delete + insert, so alerts and entity links that already reference an
+        event stay valid while the event grows.
+        """
+        with self.transaction():  # type: ignore[attr-defined]
+            for ev in events:
+                cols = self._EVENT_COLUMNS.split(", ")
+                updates = ", ".join(f"{c} = excluded.{c}" for c in cols[1:])
+                try:
+                    self._conn.execute(
+                        f"INSERT INTO events ({self._EVENT_COLUMNS})"
+                        f" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                        f" ON CONFLICT(event_id) DO UPDATE SET {updates}",
+                        self._event_row(ev),
+                    )
+                    self._conn.execute(
+                        "DELETE FROM event_observations WHERE event_id = ?", (ev.event_id,)
+                    )
+                    self._conn.executemany(
+                        "INSERT INTO event_observations (event_id, observation_id, position)"
+                        " VALUES (?, ?, ?)",
+                        [(ev.event_id, oid, pos) for pos, oid in enumerate(ev.observation_ids)],
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise translate_integrity_error(exc, f"event {ev.event_id}") from exc
+
+    def save_entities(self, entities: Iterable[Entity]) -> None:
+        """Make the stored entities equal `entities` without touching alerts' entity references.
+
+        Entities are recomputed from all events after each streaming step, so membership can
+        change; rows are upserted and membership rewritten. An entity that no longer exists is
+        removed only if no alert cites it.
+        """
+        entities = list(entities)
+        with self.transaction():  # type: ignore[attr-defined]
+            self._conn.execute("DELETE FROM entity_events")
+            for ent in entities:
+                self._conn.execute(
+                    "INSERT INTO entities (entity_id, entity_type, attributes_json, match_level,"
+                    " first_seen, first_seen_utc, last_seen, last_seen_utc, match_score)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    " ON CONFLICT(entity_id) DO UPDATE SET"
+                    " attributes_json = excluded.attributes_json,"
+                    " match_level = excluded.match_level, first_seen = excluded.first_seen,"
+                    " first_seen_utc = excluded.first_seen_utc, last_seen = excluded.last_seen,"
+                    " last_seen_utc = excluded.last_seen_utc, match_score = excluded.match_score",
+                    (
+                        ent.entity_id,
+                        ent.entity_type.value,
+                        canonical_json(ent.attributes),
+                        ent.match_level.value,
+                        ent.first_seen.isoformat(),
+                        utc_key(ent.first_seen),
+                        ent.last_seen.isoformat(),
+                        utc_key(ent.last_seen),
+                        ent.match_score,
+                    ),
+                )
+                self._insert_entity_links(ent)
+            keep = [e.entity_id for e in entities]
+            marks = ",".join("?" * len(keep)) or "NULL"
+            self._conn.execute(
+                f"DELETE FROM entities WHERE entity_id NOT IN ({marks})"
+                " AND entity_id NOT IN (SELECT entity_id FROM alerts WHERE entity_id IS NOT NULL)",
+                keep,
+            )
+
+    # ---- event / entity reads ----------------------------------------------------------------
     def get_event(self, event_id: str) -> Event | None:
         rows = self._event_rows("e.event_id = ?", [event_id])
         return rows[0] if rows else None
@@ -130,8 +241,14 @@ class DerivedMixin:
         zone: Zone | None = None,
         object_type: ObjectType | None = None,
         entity_id: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        open_only: bool = False,
     ) -> list[Event]:
-        """Events matching ALL given filters, ordered by first_seen then event_id."""
+        """Events matching ALL given filters, ordered by first_seen then event_id.
+
+        `start`/`end` select events whose [first_seen, last_seen] overlaps that time range.
+        """
         where, params = [], []
         if zone is not None:
             where.append("e.zone = ?")
@@ -142,6 +259,14 @@ class DerivedMixin:
         if entity_id is not None:
             where.append("ee.entity_id = ?")
             params.append(entity_id)
+        if start is not None:
+            where.append("e.last_seen_utc >= ?")
+            params.append(utc_key(start))
+        if end is not None:
+            where.append("e.first_seen_utc <= ?")
+            params.append(utc_key(end))
+        if open_only:
+            where.append("e.status = 'open'")
         return self._event_rows(" AND ".join(where) or "1 = 1", params)
 
     def get_event_observations(self, event_id: str) -> list[Observation]:
@@ -207,8 +332,13 @@ class DerivedMixin:
                     "description": r["description"],
                     "observation_ids": [o for o, _ in evidence[r["event_id"]]],
                     "frame_ids": [f for _, f in evidence[r["event_id"]]],
-                    "close_reason": CloseReason(r["close_reason"]),
+                    "close_reason": (
+                        CloseReason.OPEN
+                        if r["status"] == "open"
+                        else CloseReason(r["close_reason"])
+                    ),
                     "entity_id": r["entity_id"],
+                    "confidence": r["confidence"],
                 }
             )
             for r in rows
@@ -220,12 +350,21 @@ class DerivedMixin:
             params,
         ).fetchall()
         members: dict[str, list[str]] = {r["entity_id"]: [] for r in rows}
+        scores: dict[str, dict[str, float]] = {r["entity_id"]: {} for r in rows}
+        components: dict[str, dict[str, dict[str, float]]] = {r["entity_id"]: {} for r in rows}
         for r in self._conn.execute(
-            "SELECT ee.entity_id, ee.event_id FROM entity_events ee"
+            "SELECT ee.entity_id, ee.event_id, ee.link_score, ee.link_components_json"
+            " FROM entity_events ee"
             " JOIN events e ON e.event_id = ee.event_id ORDER BY e.first_seen_utc, e.event_id"
         ):
             if r["entity_id"] in members:
                 members[r["entity_id"]].append(r["event_id"])
+                if r["link_score"] is not None:
+                    scores[r["entity_id"]][r["event_id"]] = r["link_score"]
+                if r["link_components_json"]:
+                    components[r["entity_id"]][r["event_id"]] = json.loads(
+                        r["link_components_json"]
+                    )
         return [
             Entity.model_validate(
                 {
@@ -236,9 +375,13 @@ class DerivedMixin:
                     "first_seen": datetime.fromisoformat(r["first_seen"]),
                     "last_seen": datetime.fromisoformat(r["last_seen"]),
                     "event_ids": members[r["entity_id"]],
+                    "match_score": r["match_score"],
+                    "link_scores": scores[r["entity_id"]],
+                    "link_components": components[r["entity_id"]],
                 }
             )
             for r in rows
+            if members[r["entity_id"]]
         ]
 
     # ---- alerts ----------------------------------------------------------------------------
@@ -246,13 +389,13 @@ class DerivedMixin:
         """Atomically replace ALL stored alerts with `alerts`. Returns the previous count.
 
         Alerts are derived (events + entities + rules), so a re-run replaces them; deterministic
-        alert ids mean unchanged inputs give identical rows. Links must reference stored events
-        and entities (foreign keys).
+        alert ids mean unchanged inputs give identical rows. Links must reference stored events,
+        entities and telemetry samples (foreign keys).
         """
         with self.transaction():  # type: ignore[attr-defined]
             previous = self.count_alerts()
-            self._conn.execute("DELETE FROM alert_events")
-            self._conn.execute("DELETE FROM alerts")
+            for table in ("alert_history", "alert_telemetry", "alert_events", "alerts"):
+                self._conn.execute(f"DELETE FROM {table}")
             try:
                 for alert in alerts:
                     self._insert_alert(alert)
@@ -260,11 +403,37 @@ class DerivedMixin:
                 raise translate_integrity_error(exc, "alert data") from exc
             return previous
 
+    def save_alert(self, alert: Alert) -> None:
+        """Insert or update one alert with its links and full lifecycle history (streaming)."""
+        with self.transaction():  # type: ignore[attr-defined]
+            try:
+                exists = self._conn.execute(
+                    "SELECT 1 FROM alerts WHERE alert_id = ?", (alert.alert_id,)
+                ).fetchone()
+                if exists:
+                    for table in ("alert_history", "alert_telemetry", "alert_events"):
+                        self._conn.execute(
+                            f"DELETE FROM {table} WHERE alert_id = ?", (alert.alert_id,)
+                        )
+                    self._conn.execute("DELETE FROM alerts WHERE alert_id = ?", (alert.alert_id,))
+                self._insert_alert(alert)
+            except sqlite3.IntegrityError as exc:
+                raise translate_integrity_error(exc, f"alert {alert.alert_id}") from exc
+
+    _ALERT_COLUMNS = (
+        "alert_id, rule_id, severity, title, message, triggered_at, triggered_at_utc,"
+        " first_seen, first_seen_utc, last_seen, last_seen_utc, zone, entity_id, facts_json,"
+        " status, confidence, verdict, recommended_action, ladder_json, detected_at, updated_at,"
+        " resolved_at"
+    )
+
     def _insert_alert(self, a: Alert) -> None:
+        ladder = [
+            {"at": s.at.isoformat(), "severity": s.severity.value, "label": s.label}
+            for s in a.ladder
+        ]
         self._conn.execute(
-            "INSERT INTO alerts (alert_id, rule_id, severity, title, message, triggered_at,"
-            " triggered_at_utc, first_seen, first_seen_utc, last_seen, last_seen_utc, zone,"
-            " entity_id, facts_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO alerts ({self._ALERT_COLUMNS}) VALUES ({','.join('?' * 22)})",
             (
                 a.alert_id,
                 a.rule_id,
@@ -280,11 +449,46 @@ class DerivedMixin:
                 a.zone.value if a.zone else None,
                 a.entity_id,
                 canonical_json(a.facts),
+                a.status.value,
+                a.confidence,
+                a.verdict.value if a.verdict else None,
+                a.recommended_action,
+                json.dumps(ladder, sort_keys=True),
+                a.detected_at.isoformat() if a.detected_at else None,
+                a.updated_at.isoformat() if a.updated_at else None,
+                a.resolved_at.isoformat() if a.resolved_at else None,
             ),
         )
         self._conn.executemany(
             "INSERT INTO alert_events (alert_id, event_id) VALUES (?, ?)",
             [(a.alert_id, eid) for eid in a.event_ids],
+        )
+        self._conn.executemany(
+            "INSERT INTO alert_telemetry (alert_id, telemetry_ts_utc) VALUES (?, ?)",
+            [(a.alert_id, utc_key(ts)) for ts in a.telemetry_at],
+        )
+        self._conn.executemany(
+            "INSERT INTO alert_history (alert_id, seq, kind, at, at_utc, effective_at,"
+            " effective_at_utc, from_status, to_status, from_severity, to_severity, reason, actor)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    a.alert_id,
+                    t.seq,
+                    t.kind.value,
+                    t.at.isoformat(),
+                    utc_key(t.at),
+                    t.effective_at.isoformat(),
+                    utc_key(t.effective_at),
+                    t.from_status.value if t.from_status else None,
+                    t.to_status.value,
+                    t.from_severity.value if t.from_severity else None,
+                    t.to_severity.value,
+                    t.reason,
+                    t.actor,
+                )
+                for t in a.history
+            ],
         )
 
     def count_alerts(self) -> int:
@@ -300,6 +504,8 @@ class DerivedMixin:
         rule_id: str | None = None,
         severity: Severity | None = None,
         zone: Zone | None = None,
+        status: AlertStatus | None = None,
+        active_only: bool = False,
     ) -> list[Alert]:
         """Alerts matching ALL given filters, ordered by triggered_at then alert_id."""
         where, params = [], []
@@ -312,6 +518,11 @@ class DerivedMixin:
         if zone is not None:
             where.append("a.zone = ?")
             params.append(Zone(zone).value)
+        if status is not None:
+            where.append("a.status = ?")
+            params.append(AlertStatus(status).value)
+        if active_only:
+            where.append("a.status != 'resolved'")
         return self._alert_rows(" AND ".join(where) or "1 = 1", params)
 
     def _alert_rows(self, condition: str, params: list[object]) -> list[Alert]:
@@ -321,6 +532,8 @@ class DerivedMixin:
         ).fetchall()
         events: dict[str, list[str]] = {r["alert_id"]: [] for r in rows}
         frames: dict[str, set[int]] = {r["alert_id"]: set() for r in rows}
+        telemetry: dict[str, list[datetime]] = {r["alert_id"]: [] for r in rows}
+        history: dict[str, list[AlertTransition]] = {r["alert_id"]: [] for r in rows}
         ids = list(events)
         for i in range(0, len(ids), _IN_CHUNK):
             chunk = ids[i : i + _IN_CHUNK]
@@ -340,6 +553,33 @@ class DerivedMixin:
                 chunk,
             ):
                 frames[r["alert_id"]].add(r["frame_id"])
+            for r in self._conn.execute(
+                "SELECT atl.alert_id, t.timestamp FROM alert_telemetry atl"
+                " JOIN telemetry t ON t.ts_utc = atl.telemetry_ts_utc"
+                f" WHERE atl.alert_id IN ({marks}) ORDER BY t.ts_utc",
+                chunk,
+            ):
+                telemetry[r["alert_id"]].append(datetime.fromisoformat(r["timestamp"]))
+            for r in self._conn.execute(
+                f"SELECT * FROM alert_history WHERE alert_id IN ({marks}) ORDER BY alert_id, seq",
+                chunk,
+            ):
+                history[r["alert_id"]].append(
+                    AlertTransition.model_validate(
+                        {
+                            "seq": r["seq"],
+                            "kind": r["kind"],
+                            "at": datetime.fromisoformat(r["at"]),
+                            "effective_at": datetime.fromisoformat(r["effective_at"]),
+                            "from_status": r["from_status"],
+                            "to_status": r["to_status"],
+                            "from_severity": r["from_severity"],
+                            "to_severity": r["to_severity"],
+                            "reason": r["reason"],
+                            "actor": r["actor"],
+                        }
+                    )
+                )
         return [
             Alert.model_validate(
                 {
@@ -356,6 +596,29 @@ class DerivedMixin:
                     "entity_id": r["entity_id"],
                     "frame_ids": sorted(frames[r["alert_id"]]),
                     "facts": json.loads(r["facts_json"]),
+                    "status": r["status"],
+                    "confidence": r["confidence"],
+                    "verdict": Verdict(r["verdict"]) if r["verdict"] else None,
+                    "recommended_action": r["recommended_action"],
+                    "ladder": [
+                        LadderStep(
+                            at=datetime.fromisoformat(s["at"]),
+                            severity=Severity(s["severity"]),
+                            label=s["label"],
+                        )
+                        for s in json.loads(r["ladder_json"])
+                    ],
+                    "detected_at": (
+                        datetime.fromisoformat(r["detected_at"]) if r["detected_at"] else None
+                    ),
+                    "updated_at": (
+                        datetime.fromisoformat(r["updated_at"]) if r["updated_at"] else None
+                    ),
+                    "resolved_at": (
+                        datetime.fromisoformat(r["resolved_at"]) if r["resolved_at"] else None
+                    ),
+                    "telemetry_at": telemetry[r["alert_id"]],
+                    "history": history[r["alert_id"]],
                 }
             )
             for r in rows

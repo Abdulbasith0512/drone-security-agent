@@ -7,6 +7,8 @@ indexes (text comparison of ISO strings with different offsets would be wrong).
 Version 1 (M2): telemetry, frames, observations, detected_objects, observations_fts.
 Version 2 (M3): events, event_observations, entities, entity_events (derived data).
 Version 3 (M4): alerts, alert_events (derived from events/entities by the rule engine).
+Version 4 (M9): streaming runs and the alert lifecycle: telemetry signal, observation provenance,
+open events, entity match scores, alert status/history/telemetry evidence, scenarios, agent_runs.
 Migrations only ever ADD objects, so an older database keeps all of its data when upgraded.
 """
 
@@ -171,6 +173,89 @@ _V3: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_alert_events_event ON alert_events(event_id)",
 )
 
+_V4: tuple[str, ...] = (
+    # Streaming runs, alert lifecycle, safety (telemetry) alerts, provenance. Only ALTER ... ADD
+    # COLUMN and new tables, so every older database keeps all of its data.
+    "ALTER TABLE telemetry ADD COLUMN signal_percent REAL",
+    # How an observation's description was obtained: scripted | canned | replayed | live.
+    # NULL for rows stored before provenance existed.
+    "ALTER TABLE observations ADD COLUMN provenance TEXT",
+    # Streaming persists events while they are still open. `close_reason` keeps its old CHECK, so
+    # an OPEN event stores the placeholder 'scenario_end' there and is identified by status.
+    "ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT 'closed'"
+    " CHECK (status IN ('open', 'closed'))",
+    "ALTER TABLE events ADD COLUMN confidence REAL",
+    # Entity re-identification is a scored heuristic (0-1) with per-link evidence.
+    "ALTER TABLE entities ADD COLUMN match_score REAL",
+    "ALTER TABLE entity_events ADD COLUMN link_score REAL",
+    "ALTER TABLE entity_events ADD COLUMN link_components_json TEXT",
+    # Alert lifecycle and triage fields.
+    "ALTER TABLE alerts ADD COLUMN status TEXT NOT NULL DEFAULT 'open'"
+    " CHECK (status IN ('open', 'acknowledged', 'escalated', 'resolved'))",
+    "ALTER TABLE alerts ADD COLUMN confidence REAL",
+    "ALTER TABLE alerts ADD COLUMN verdict TEXT",
+    "ALTER TABLE alerts ADD COLUMN recommended_action TEXT",
+    "ALTER TABLE alerts ADD COLUMN ladder_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE alerts ADD COLUMN detected_at TEXT",
+    "ALTER TABLE alerts ADD COLUMN updated_at TEXT",
+    "ALTER TABLE alerts ADD COLUMN resolved_at TEXT",
+    # Safety alerts cite telemetry samples (by their unique UTC timestamp), not events.
+    """
+    CREATE TABLE IF NOT EXISTS alert_telemetry (
+        alert_id        TEXT NOT NULL REFERENCES alerts(alert_id),
+        telemetry_ts_utc TEXT NOT NULL REFERENCES telemetry(ts_utc),
+        PRIMARY KEY (alert_id, telemetry_ts_utc)
+    )
+    """,
+    # Every lifecycle change of an alert: who did what, when recorded, when the condition began.
+    """
+    CREATE TABLE IF NOT EXISTS alert_history (
+        alert_id         TEXT NOT NULL REFERENCES alerts(alert_id),
+        seq              INTEGER NOT NULL CHECK (seq >= 1),
+        kind             TEXT NOT NULL
+            CHECK (kind IN ('raised', 'escalated', 'acknowledged', 'resolved')),
+        at               TEXT NOT NULL,
+        at_utc           TEXT NOT NULL,
+        effective_at     TEXT NOT NULL,
+        effective_at_utc TEXT NOT NULL,
+        from_status      TEXT,
+        to_status        TEXT NOT NULL,
+        from_severity    TEXT,
+        to_severity      TEXT NOT NULL,
+        reason           TEXT NOT NULL,
+        actor            TEXT NOT NULL,
+        PRIMARY KEY (alert_id, seq)
+    )
+    """,
+    # The scenario a run replayed and its machine-readable ground truth (JSON), if any.
+    """
+    CREATE TABLE IF NOT EXISTS scenarios (
+        name        TEXT PRIMARY KEY,
+        description TEXT NOT NULL,
+        start       TEXT NOT NULL,
+        spec_sha256 TEXT NOT NULL,
+        expect_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    # One row per patrol run and per analyst answer: inputs, mode, counters and a step trace.
+    # No prompts, keys or model reasoning are stored, only what the code observed.
+    """
+    CREATE TABLE IF NOT EXISTS agent_runs (
+        run_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind         TEXT NOT NULL CHECK (kind IN ('patrol', 'analyst')),
+        label        TEXT NOT NULL,
+        mode         TEXT NOT NULL,
+        status       TEXT NOT NULL,
+        input_text   TEXT,
+        output_text  TEXT,
+        metrics_json TEXT NOT NULL DEFAULT '{}',
+        trace_json   TEXT NOT NULL DEFAULT '[]'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status, severity)",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_zone ON telemetry(zone, ts_utc)",
+)
+
 # target schema version -> statements that bring a (version - 1) database up to it
-MIGRATIONS: dict[int, tuple[str, ...]] = {1: _V1, 2: _V2, 3: _V3}
+MIGRATIONS: dict[int, tuple[str, ...]] = {1: _V1, 2: _V2, 3: _V3, 4: _V4}
 SCHEMA_VERSION = max(MIGRATIONS)

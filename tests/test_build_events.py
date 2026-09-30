@@ -244,7 +244,9 @@ def test_m3_database_is_upgraded_to_add_alert_tables(tmp_path):
         assert store.migrated_from == 2
         assert store.count_events() == 7 and store.count_entities() == 2
         assert store.count_alerts() == 0
-        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert (
+            store._conn.execute("PRAGMA user_version").fetchone()[0] == schema_module.SCHEMA_VERSION
+        )
 
 
 def test_database_from_a_newer_version_is_refused(tmp_path):

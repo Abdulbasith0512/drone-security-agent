@@ -14,6 +14,8 @@ class Telemetry(DomainModel):
     altitude_m: float = Field(ge=0, le=500, allow_inf_nan=False)
     zone: Zone
     battery_percent: float = Field(ge=0, le=100, allow_inf_nan=False)
+    # Link quality, 0-100. None = the source reports no signal (older data, video timelines).
+    signal_percent: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
 
 
 class TelemetryAssociation(DomainModel):

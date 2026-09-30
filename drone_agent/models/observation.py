@@ -2,7 +2,7 @@
 
 from pydantic import AliasChoices, AwareDatetime, Field
 
-from drone_agent.models.base import DomainModel, ObjectType, Zone
+from drone_agent.models.base import DomainModel, ObjectType, Provenance, Zone
 from drone_agent.models.telemetry import TelemetryAssociation
 
 
@@ -25,3 +25,6 @@ class Observation(DomainModel):
     description: str = Field(min_length=1)
     detected_objects: list[DetectedObject] = Field(default_factory=list)
     telemetry: TelemetryAssociation | None = None
+    # How the description was obtained (scripted / canned / replayed / live); None = unknown
+    # (data stored before provenance was recorded).
+    provenance: Provenance | None = None

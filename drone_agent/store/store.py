@@ -23,9 +23,13 @@ from drone_agent.store.errors import (
     StoreError,
     translate_integrity_error,
 )
+from drone_agent.store.runs import RunsMixin
 from drone_agent.store.schema import MIGRATIONS, SCHEMA_VERSION
 
 _IN_CHUNK = 500  # stay well below SQLite's bound-parameter limit
+
+
+_ADD_COLUMN = re.compile(r"^\s*ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)", re.IGNORECASE)
 
 
 def _fts_query(text: str) -> str:
@@ -50,7 +54,7 @@ def _objects_text(obs: Observation) -> str:
     return " ".join(parts)
 
 
-class Store(DerivedMixin):
+class Store(DerivedMixin, RunsMixin):
     """Explicit persistence API. One frame maps to one observation (frame_id is unique).
 
     `migrated_from` is the schema version an existing database was upgraded from (None if it was
@@ -92,6 +96,8 @@ class Store(DerivedMixin):
             with self.transaction():
                 for target in range(version + 1, SCHEMA_VERSION + 1):
                     for statement in MIGRATIONS[target]:
+                        if self._column_already_added(statement):
+                            continue  # idempotent: the column is there from an earlier attempt
                         self._conn.execute(statement)
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         except sqlite3.OperationalError as exc:
@@ -100,6 +106,15 @@ class Store(DerivedMixin):
                     "this SQLite build does not provide FTS5; search cannot be enabled"
                 ) from exc
             raise
+
+    def _column_already_added(self, statement: str) -> bool:
+        """True for `ALTER TABLE t ADD COLUMN c ...` when column c already exists in t."""
+        match = _ADD_COLUMN.match(statement)
+        if match is None:
+            return False
+        table, column = match.groups()
+        existing = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+        return column in existing
 
     def close(self) -> None:
         self._conn.close()
@@ -137,7 +152,7 @@ class Store(DerivedMixin):
             try:
                 cur = self._conn.execute(
                     "INSERT INTO telemetry (timestamp, ts_utc, latitude, longitude, altitude_m,"
-                    " zone, battery_percent) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    " zone, battery_percent, signal_percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         sample.timestamp.isoformat(),
                         utc_key(sample.timestamp),
@@ -146,6 +161,7 @@ class Store(DerivedMixin):
                         sample.altitude_m,
                         sample.zone.value,
                         sample.battery_percent,
+                        sample.signal_percent,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -174,7 +190,7 @@ class Store(DerivedMixin):
                 self._conn.execute(
                     "INSERT INTO observations (observation_id, frame_id, timestamp, ts_utc,"
                     " source, zone, description, telemetry_id, telemetry_age_seconds,"
-                    " telemetry_stale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " telemetry_stale, provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         obs.observation_id,
                         obs.frame_id,
@@ -186,6 +202,7 @@ class Store(DerivedMixin):
                         telemetry_id,
                         age,
                         stale,
+                        obs.provenance.value if obs.provenance else None,
                     ),
                 )
                 self._conn.executemany(
@@ -327,6 +344,63 @@ class Store(DerivedMixin):
     def count_telemetry(self) -> int:
         return self._count("telemetry")
 
+    # ---- telemetry reads -------------------------------------------------------------------
+    def list_telemetry_rows(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[tuple[int, Telemetry]]:
+        """(telemetry_id, sample) pairs in time order; `start`/`end` are inclusive."""
+        where, params = [], []
+        if start is not None:
+            where.append("ts_utc >= ?")
+            params.append(utc_key(start))
+        if end is not None:
+            where.append("ts_utc <= ?")
+            params.append(utc_key(end))
+        sql = "SELECT * FROM telemetry"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ts_utc"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return [
+            (r["telemetry_id"], _telemetry_from_row(r)) for r in self._conn.execute(sql, params)
+        ]
+
+    def list_telemetry(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Telemetry]:
+        return [t for _, t in self.list_telemetry_rows(start=start, end=end, limit=limit)]
+
+    def get_telemetry(self, telemetry_id: int) -> Telemetry | None:
+        row = self._conn.execute(
+            "SELECT * FROM telemetry WHERE telemetry_id = ?", (telemetry_id,)
+        ).fetchone()
+        return _telemetry_from_row(row) if row else None
+
+    def telemetry_id_for(self, timestamp: datetime) -> int | None:
+        """The id of the sample stored at exactly `timestamp` (None if there is none)."""
+        row = self._conn.execute(
+            "SELECT telemetry_id FROM telemetry WHERE ts_utc = ?", (utc_key(timestamp),)
+        ).fetchone()
+        return row["telemetry_id"] if row else None
+
+    def telemetry_before(self, timestamp: datetime) -> tuple[int, Telemetry] | None:
+        """The most recent sample at or before `timestamp` (the sync rule), with its id."""
+        row = self._conn.execute(
+            "SELECT * FROM telemetry WHERE ts_utc <= ? ORDER BY ts_utc DESC LIMIT 1",
+            (utc_key(timestamp),),
+        ).fetchone()
+        return (row["telemetry_id"], _telemetry_from_row(row)) if row else None
+
     def count_detected_objects(self) -> int:
         return self._count("detected_objects")
 
@@ -336,9 +410,10 @@ class Store(DerivedMixin):
     # ---- query building / row conversion ---------------------------------------------------
     _COLUMNS = (
         "SELECT o.observation_id, o.frame_id, o.timestamp, o.source, o.zone, o.description,"
-        " o.telemetry_age_seconds, o.telemetry_stale,"
+        " o.telemetry_age_seconds, o.telemetry_stale, o.provenance,"
         " t.timestamp AS t_timestamp, t.latitude AS t_latitude, t.longitude AS t_longitude,"
-        " t.altitude_m AS t_altitude_m, t.zone AS t_zone, t.battery_percent AS t_battery_percent"
+        " t.altitude_m AS t_altitude_m, t.zone AS t_zone, t.battery_percent AS t_battery_percent,"
+        " t.signal_percent AS t_signal_percent"
     )
     _FROM = " FROM observations o"
     _TELEMETRY_JOIN = " LEFT JOIN telemetry t ON t.telemetry_id = o.telemetry_id"
@@ -425,6 +500,7 @@ def _telemetry_from_row(row: sqlite3.Row) -> Telemetry:
             "altitude_m": row["altitude_m"],
             "zone": row["zone"],
             "battery_percent": row["battery_percent"],
+            "signal_percent": row["signal_percent"],
         }
     )
 
@@ -440,6 +516,7 @@ def _observation_from_row(row: sqlite3.Row, objects: list[DetectedObject]) -> Ob
                 "altitude_m": row["t_altitude_m"],
                 "zone": row["t_zone"],
                 "battery_percent": row["t_battery_percent"],
+                "signal_percent": row["t_signal_percent"],
             }
         )
         association = TelemetryAssociation(
@@ -457,5 +534,6 @@ def _observation_from_row(row: sqlite3.Row, objects: list[DetectedObject]) -> Ob
             "description": row["description"],
             "detected_objects": objects,
             "telemetry": association,
+            "provenance": row["provenance"],
         }
     )

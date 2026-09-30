@@ -26,6 +26,14 @@ class Entity(DomainModel):
     first_seen: AwareDatetime
     last_seen: AwareDatetime
     event_ids: list[str] = Field(min_length=1)
+    # Heuristic likelihood (0-1) that the linked events are one vehicle: the weakest link between
+    # consecutive appearances. It is a scored heuristic on coarse attributes, NOT a calibrated
+    # probability and never an identity claim. None for entities built without scoring.
+    match_score: float | None = Field(default=None, ge=0, le=1)
+    # Per-event link evidence: event_id -> score against the previous appearance, and the weighted
+    # components behind it. The first appearance has no link.
+    link_scores: dict[str, float] = Field(default_factory=dict)
+    link_components: dict[str, dict[str, float]] = Field(default_factory=dict)
 
     @property
     def appearance_count(self) -> int:

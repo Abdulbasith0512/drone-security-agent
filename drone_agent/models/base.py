@@ -19,12 +19,22 @@ class Zone(StrEnum):
     PARKING_AREA = "parking_area"
     WAREHOUSE = "warehouse"
     RESTRICTED_ZONE = "restricted_zone"
+    GARAGE = "garage"
 
 
 class ObjectType(StrEnum):
     PERSON = "person"
     VEHICLE = "vehicle"
     OTHER = "other"
+
+
+class Provenance(StrEnum):
+    """How an observation's description was obtained. Never inferred from the provider name."""
+
+    SCRIPTED = "scripted"  # authored text frames from a scenario file; no model involved
+    CANNED = "canned"  # canned demo responses; explicitly NOT a vision model
+    REPLAYED = "replayed"  # a recorded real-model response replayed from a cassette
+    LIVE = "live"  # a live model call made during this run
 
 
 class Severity(StrEnum):

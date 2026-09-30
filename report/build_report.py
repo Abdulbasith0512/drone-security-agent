@@ -329,6 +329,60 @@ def build_context():
     )
     n_scen = len(fresh["rules"]["measured"]["scenarios"])
     V["rule_scenarios"] = str(n_scen)
+    # -- test inventory, counted from the collected suite rather than typed by hand
+    collected = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    test_ids = [line for line in collected if "::" in line]
+    V["n_tests"] = f"{len(test_ids):,}"
+    V["n_test_modules"] = str(len({line.split("::")[0] for line in test_ids}))
+    # -- streaming ground truth and adaptive sampling (tables parsed from the committed snapshot,
+    # cross-checked against the fresh run so a stale snapshot cannot be rendered)
+    gt = first(T, "Ground-truth scenarios: precision, recall, F1, severity and detection latency")
+    fresh_gt = fresh["ground_truth"]["measured"]["aggregate"]
+    assert sum(int(r["tp"]) for r in gt) == fresh_gt["tp"], "ground-truth snapshot differs"
+    assert sum(int(r["fp"]) + int(r["fn"]) for r in gt) == fresh_gt["fp"] + fresh_gt["fn"], (
+        "ground-truth snapshot differs"
+    )
+    V["gt_scenarios"] = str(len(gt))
+    V["gt_tp"] = str(fresh_gt["tp"])
+    V["gt_exact"] = str(sum(1 for r in gt if r["exact"] == "True"))
+    ctx["TBL_GT"] = table(
+        [
+            "scenario",
+            "expected_alerts",
+            "tp",
+            "fp",
+            "fn",
+            "f1",
+            "forbidden_hits",
+            "events",
+            "exact",
+        ],
+        gt,
+        "Streaming run against author-written labels (controlled synthetic scenarios only)",
+        "num",
+    )
+    samp = first(T, "Adaptive sampling versus a pixel gate: calls saved AND changes missed")
+    fresh_samp = fresh["sampler"]["measured"]["policies"]
+    assert len(samp) == len(fresh_samp), "sampler snapshot differs"
+    ctx["TBL_SAMPLER"] = table(
+        [
+            "policy",
+            "calls_mean",
+            "avoided_pct_mean",
+            "recall",
+            "calls_per_detected",
+            "missed_small",
+        ],
+        samp,
+        "Model calls against changes detected (8 generated 600-frame streams)",
+        "num",
+    )
     # -- adversarial
     cats: dict[str, list] = {}
     for r in adv:

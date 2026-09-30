@@ -41,8 +41,18 @@ python -m drone_agent alerts       --db output/security.db --show ALR-LOITER-EVT
 python -m drone_agent query        --db output/security.db --search "blue pickup"        # also --zone --object --start --end --explain
 python -m drone_agent events       --db output/security.db --evidence EVT-P-001
 ```
-On `security_events` this gives 7 events and 6 alerts (a person loitering at the gate for 480 s, three after-hours person alerts, one restricted-zone entry, and a repeat-vehicle alert
-worded "a *similar* blue pickup was observed in 3 separate appearances"); `normal_day` gives none. Ingesting twice into one database is rejected and changes nothing.
+On `security_events` this gives 7 events and 7 alerts (a person loitering at the gate for 480 s that escalates from warning to critical, three after-hours person alerts, one restricted-zone entry,
+a repeat-vehicle alert worded "a *similar* blue pickup was observed in 3 separate appearances", and a drone-safety `signal_loss` alert from a telemetry dropout); `normal_day` gives none.
+Ingesting twice into one database is rejected and changes nothing.
+
+**1b. The same scenario as a live, progressive run (offline):** frames and telemetry are consumed one tick at a time, and each alert is saved and printed the moment it fires, not after the run.
+```
+python -m drone_agent scenarios                                           # the ten shipped scenarios and what each exercises
+python -m drone_agent run --scenario security_events --speed 0 --no-live  # add --speed 5 for paced playback; omit --no-live for the live dashboard
+python -m drone_agent run --scenario loiter_midnight --speed 0 --no-live  # person at the gate across midnight: warning at 2 min, critical at 5 min
+python -m drone_agent run --scenario low_battery --speed 0 --no-live      # emergency: drone-safety alerts from telemetry alone (also signal_loss, geofence_violation)
+```
+Each run prints the alert lifecycle (raised, escalated, acknowledged, resolved), the recommended action stored with every alert, and a comparison with the scenario's ground-truth labels.
 
 **2. Analyst questions, summary and follow-ups (offline template analyst, no key):**
 ```
@@ -93,8 +103,8 @@ drone_agent/ Python backend + dashboard server (web/)     tests/  docs/  config/
 
 ## Architecture overview
 Scripted text frames or a real video (sampled, pixel-gated, described by Gemini or a cassette) become **observations** joined to simulated telemetry, indexed in **SQLite + FTS5**. An
-**event aggregator** merges repeated detections into events with duration; an **entity linker** groups separate vehicle events into coarse "similar vehicle" entities; four **deterministic rules**
-turn events into alerts with evidence ids; a **read-only analyst** (offline template, or LangChain + Gemini behind a citation gate) answers questions and summarises the run. An offline
+**event aggregator** merges repeated detections into events with duration; an **entity linker** groups separate vehicle events into coarse "similar vehicle" entities; eight **deterministic rules**
+(four over camera events, four over drone telemetry) turn events and telemetry into alerts with evidence ids, severity ladders and a lifecycle; a **read-only analyst** (offline template, or LangChain + Gemini behind a citation gate) answers questions and summarises the run. An offline
 **evaluation harness** measures the pieces. The full diagram, stage table and package layout are in [docs/architecture.md](docs/architecture.md).
 
 ## Real versus simulated
@@ -108,14 +118,14 @@ turn events into alerts with evidence ids; a **read-only analyst** (offline temp
 ## Requirements to evidence
 | Assignment item | Where it is met |
 |---|---|
-| Process simulated telemetry and video frames | `simulate`, `ingest` (scripted frames + seeded telemetry); `ingest-video` (real video); `drone_agent/telemetry`, `drone_agent/video` |
+| Process simulated telemetry and video frames | `simulate`, `ingest`, `run` (scripted frames + seeded telemetry, batch or progressive); `ingest-video` (real video, then `build-events` and `analyze`); `drone_agent/telemetry`, `drone_agent/video`, `drone_agent/runtime` |
 | Identify objects/events and log them with context | observations with zone, time and telemetry; events with first/last seen and duration; `events --evidence`; Gemini frame descriptions ([real-video experiment](docs/real_video_experiment.md)) |
-| Alerts from predefined rules | four deterministic rules in `config/security_rules.yaml`; `analyze`, `alerts --show` |
+| Alerts from predefined rules | eight deterministic rules in `config/security_rules.yaml` (loitering, after-hours presence, repeat vehicle, restricted-zone entry, low battery, signal loss, altitude anomaly, geofence violation); `analyze`, `alerts --show`; `run` raises them progressively |
 | Frame-by-frame indexing (cross-domain) | SQLite `frames`/`observations` with FTS5; `query` by time, zone, object or keyword ("show all truck events" style queries) |
 | Feature spec / architecture / design artifacts | [feature_spec.md](docs/feature_spec.md), [architecture.md](docs/architecture.md) (Mermaid diagram) |
 | AI-generated components and AI usage | [ai_usage.md](docs/ai_usage.md) |
 | Test cases | [testing.md](docs/testing.md), `pytest`, [evaluation.md](docs/evaluation.md) |
-| Sample output: logs, alert, queryable frames | demo commands 1 and 2 above |
+| Sample output: logs, alert, queryable frames | demo commands 1, 1b and 2 above |
 | VLM script, LangChain agent, context management | `drone_agent/vision/gemini.py`; `drone_agent/agent/` (bounded session memory, tools, citation gate) |
 | Bonus: video summary, follow-up questions | `summarize`; `ask --follow-up` and `--interactive` |
 
@@ -124,12 +134,12 @@ Numbers come from the executable harness and the recorded run; the documents exp
 
 | Area | Result | Kind of evidence |
 |---|---|---|
-| Test suite | At the time of this submission, 538 tests pass (all offline) | automated tests ([testing.md](docs/testing.md)) |
-| `security_events` scenario | 27 observations, 20 detections, 7 events (ratio 2.86), 2 vehicle entities, 6 alerts; `normal_day`: 0 alerts | controlled scripted scenario |
+| Test suite | 963 tests collected and passing (all offline) | automated tests ([testing.md](docs/testing.md)) |
+| `security_events` scenario | 27 observations, 20 detections, 7 events (ratio 2.86), 2 vehicle entities, 7 alerts; `normal_day`: 0 alerts | controlled scripted scenario |
 | Frame gate (default threshold 6.0) | 5 of 40 fixture frames sent (87.5% fewer calls) but only 2 of 4 meaningful changes detected; both illumination-only changes accepted | controlled synthetic frames |
 | Flicker tolerance | one undetected frame: 2 events and 0 loitering alerts without tolerance, 1 event and 1 alert with the default | controlled scenario |
 | Entity memory | 1 repeat-vehicle alert with linking, 0 without; negative controls show a false-link limitation | controlled scenario |
-| Rules | 21 labelled synthetic scenarios all matched their labels (labels and rules share an author) | controlled; not real-world precision/recall |
+| Rules | 22 labelled synthetic scenarios all matched their labels (labels and rules share an author) | controlled; not real-world precision/recall |
 | Citation gate | 29 of 29 correct on the authored adversarial fixture set. This is not independent evidence of general citation reliability: two validator fixes were made after this same suite exposed them, so the fixtures informed the corrections | controlled adversarial suite |
 | Semantic faithfulness probe | all 22 answers with valid citations but unsupported claims were accepted by the gate; an eval-only structured checker catches 13 of them by construction and 9 still pass | controlled probe |
 | Scale (one machine) | up to 50,000 generated observations; entity linking is superlinear at that size | timings on the development machine |
@@ -149,7 +159,8 @@ its length and the simulated time and zone, so it says nothing about detection a
 - **Measure, do not tune.** The evaluation harness is offline and deterministic, and negative results were kept rather than tuned away.
 
 ## Limitations
-- Telemetry, zone and time are simulated; the "real-time" behaviour is streaming on a simulated clock.
+- Telemetry, zone and time are simulated; the "real-time" behaviour is streaming on a simulated clock. Alerts are raised as the run progresses only for scripted scenarios (`run`); a real video is
+  ingested first and turned into events and alerts by the separate `build-events` and `analyze` commands, so its alerts appear after ingestion, not during it.
 - The real-video run is one short clip with no ground truth, so it does not measure perception accuracy or security performance.
 - The gate is pixel-based, not semantic: at the default threshold it missed small meaningful changes on the fixture.
 - Free-text VLM attributes fragment events in real output, and coarse vehicle matching can link different vehicles; neither is identity.
@@ -158,7 +169,7 @@ its length and the simulated time and zone, so it says nothing about detection a
 - Only a few live Gemini runs were made; no reliability claim is made from them.
 
 ## Testing
-At the time of this submission, 538 automated tests pass, all offline (SDK and LLM boundaries are mocked; no test needs a key). See [docs/testing.md](docs/testing.md) for the organisation, what is and is not covered, and the clean-clone verification steps.
+963 automated tests pass, all offline (SDK and LLM boundaries are mocked; no test needs a key). See [docs/testing.md](docs/testing.md) for the organisation, what is and is not covered, and the clean-clone verification steps.
 
 ## AI tools and impact
 Claude Code (Claude Sonnet 5.5) generated the code, tests, evaluation harness and documentation from my milestone specifications; I set the scope, made and recorded the design decisions, and directed the

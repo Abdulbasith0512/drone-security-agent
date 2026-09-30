@@ -117,7 +117,7 @@ def architecture() -> str:
     b.append(box(294, 306, 84, 58, ["events"], "st"))
     b.append(box(400, 306, 96, 58, ["Entity linker", "(vehicles)"], "pr"))
     b.append(box(518, 306, 90, 58, ["entities"], "st"))
-    b.append(box(630, 306, 84, 58, ["Rule engine", "(4 rules)"], "pr"))
+    b.append(box(630, 306, 84, 58, ["Rule engine", "(8 rules)"], "pr"))
     b.append(box(724, 306, 66, 58, ["alerts"], "st"))
     b.append(edge([(720, 170), (720, 250), (81, 250), (81, 300)]))
     b.append(edge([(146, 335), (168, 335)]))
@@ -129,7 +129,7 @@ def architecture() -> str:
     b.append(edge([(336, 364), (336, 390), (672, 390), (672, 364)]))
     # analyst
     b.append(group(4, 424, 792, 132, "Analyst (read-only access to the stored evidence)"))
-    b.append(box(16, 452, 176, 60, ["Bounded read-only tools", "(10, no SQL access)"], "an"))
+    b.append(box(16, 452, 176, 60, ["Bounded read-only tools", "(13, no SQL access)"], "an"))
     b.append(box(224, 452, 206, 60, ["Offline template analyst", "or LangChain + Gemini"], "an"))
     b.append(box(462, 452, 120, 60, ["Citation gate"], "gt"))
     b.append(box(614, 452, 176, 60, ["Cited answer", "or run summary"], "an"))
@@ -148,7 +148,7 @@ def analyst() -> str:
     b.append(
         box(392, 68, 150, 64, ["LangChain tool loop", "(at most 6 rounds,", "12 tool calls)"], "an")
     )
-    b.append(box(392, 8, 150, 36, ["10 read-only tools"], "pr"))
+    b.append(box(392, 8, 150, 36, ["13 read-only tools"], "pr"))
     b.append(diamond(612, 100, 112, 74, ["Citation gate"], "gt"))
     b.append(box(690, 78, 100, 44, ["Answer shown"], "in"))
     b.append(box(268, 184, 170, 50, ["Deterministic template", "answer (labelled)"], "pr"))
@@ -222,7 +222,12 @@ def datamodel() -> str:
     )
     b.append(t)
     t, _ = table(
-        580, 250, 204, "alerts", ["rule, severity, reason", "rule facts, entity (optional)"], "gt"
+        580,
+        250,
+        204,
+        "alerts",
+        ["rule, severity, status, reason", "ladder, action, entity (optional)"],
+        "gt",
     )
     b.append(t)
     b.append(edge([(216, 46), (300, 96)], "nearest prior", 250, 58))

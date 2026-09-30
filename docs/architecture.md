@@ -24,9 +24,13 @@ flowchart TD
     AG --> EV[("events")]
     EV --> EL["EntityLinker: coarse similar-vehicle groups"]
     EL --> EN[("entities")]
-    EV --> RE["Rule engine: 4 deterministic rules"]
+    EV --> RE["Rule engine: 8 deterministic rules (4 camera + 4 telemetry safety)"]
     EN --> RE
-    RE --> AL[("alerts with evidence ids")]
+    DB --> RE
+    RE --> LC["Alert lifecycle: open, escalated, acknowledged, resolved"]
+    LC --> AL[("alerts with evidence ids, severity ladder, recommended action")]
+    RT["Streaming patrol engine (run): tick by tick, alerts as they fire"] -.-> OB
+    RT -.-> RE
     DB --> TO["Read-only bounded analyst tools"]
     EV --> TO
     EN --> TO
@@ -47,8 +51,9 @@ flowchart TD
 | SQLite index | `frames`, `telemetry`, `observations`, `detected_objects` (the frame-by-frame index) with an FTS5 keyword index, plus derived `events`, `entities` and `alerts`; SQL filters by time, class and zone | M2-M4 |
 | Event Aggregator | Detections with the same object type and zone, compatible stable attributes and a gap within tolerance extend one event (first_seen, last_seen, duration); missed detections are tolerated up to a configured number of frames. Temporal association, not tracking. No LLM | M3 |
 | Entity Memory | `EntityLinker` groups separate VEHICLE events whose normalised colour and body type are equal (or that share an explicit plate) into coarse "similar vehicle" entities. People are never linked, and a coarse link never claims physical identity | M3 |
-| Rule Engine | Deterministic rules with YAML thresholds run over stored events and entities: loitering, after-hours presence, repeat vehicle, restricted-zone entry. Alert ids are deterministic and de-duplicated on (rule, subject); severity is fixed per rule (no escalation) | M4 |
-| Alerts | Severity, reason, the numbers the rule compared, and evidence (event ids, entity id, frame ids) | M4 |
+| Rule Engine | Eight deterministic rules with YAML thresholds. Camera rules run over events and entities: loitering (warning at 120 s, the same alert escalates to critical at 300 s at the main gate), after-hours presence, repeat vehicle, restricted-zone entry. Drone-safety rules run over telemetry: low battery, signal loss, altitude anomaly, geofence violation. Alert ids are deterministic and de-duplicated on (rule, subject or episode) | M4, M9b |
+| Alerts and lifecycle | Severity, reason, the numbers the rule compared, evidence (event ids, entity id, frame ids, telemetry samples), a severity ladder, a recommended action, and a status history open -> escalated -> acknowledged -> resolved. Only a rule (condition ended) or an operator changes status | M4, M9b |
+| Streaming runtime | `run` consumes telemetry and frames one tick at a time (`drone_agent/runtime/`): an adaptive sampler decides whether a frame needs a perception call, the perception agent (timeout, retry, fallback) produces the observation, the context engine updates events and entities, and rules run after every tick, so alerts are persisted and printed the moment they fire. Scripted scenarios only; a real video still goes through ingest-video, build-events and analyze | M10 |
 | Analyst Q&A / Summary | Read-only bounded tools over the store, an offline template analyst and an optional LangChain + Gemini tool loop. Answers cite stored ids; a citation gate checks that every id exists and was retrieved, allows one correction retry, then falls back to the template answer. Truncation is stated, never silent. LangChain is confined to `drone_agent/agent/llm.py` | M6, M8a |
 | Evaluation harness | Offline, deterministic experiments (gate, compression, flicker, entity memory, rules, citation suite, semantic probe, scale) and their ablation table; no production code depends on it (only the `evaluate` CLI command loads it) | M7 |
 
@@ -58,15 +63,37 @@ Rules decide; the LLM explains and answers from tool output only.
 ## Package layout
 ```
 drone_agent/
-  models/ telemetry/ vision/ video/ store/ pipeline/ rules/ agent/ eval/
-  __main__.py (CLI)  scenario.py  simulate.py  ingest.py  clock.py
+  models/ telemetry/ vision/ video/ store/ pipeline/ rules/ agents/ runtime/ agent/ eval/ web/
+  __main__.py (CLI)  cli_run.py  scenario.py  simulate.py  ingest.py  clock.py
+frontend/  (evaluator dashboard UI)  backend/  (file-by-file guide to the code)
 config/events.yaml  config/security_rules.yaml            # event thresholds, rule thresholds
-scenarios/  tests/  docs/
+scenarios/ (ten scripted scenarios with ground-truth labels)  tests/  docs/  bench/
 output/                                                    # generated databases, cassettes, results (gitignored)
 ```
 Dependency direction: `agent` -> `store`; `rules` -> `models`; `eval` imports the production pipeline, rules and analyst gate but no pipeline, rules, store or analyst code imports `eval`; only the CLI's `evaluate` command loads it (lazily).
 The core packages (`video`, `vision`, `pipeline`, `rules`, `store`, `models`, `telemetry`) never import `agent` or `eval`, and only `drone_agent/agent/llm.py`
 imports LangChain (`tests/test_scaffold.py` and `tests/test_agent_llm.py` enforce this).
+
+---
+
+# Current state: what M9 to M13 added on top of the layers below
+
+The layer sections that follow keep the design rationale of the milestone that introduced each layer. They
+describe the original behaviour of that layer (for example "four rules", "schema version 2", "severity is fixed
+per rule"). Where the current code differs, this section is authoritative.
+
+| Topic | Current behaviour | Code |
+|---|---|---|
+| Rules | Eight families: loitering, after-hours presence, repeat vehicle, restricted-zone entry (camera) and low battery, signal loss, altitude anomaly, geofence violation (telemetry; no camera needed) | `rules/`, `config/security_rules.yaml` |
+| Severity | Ladders: one alert rises through severities as the condition worsens (loitering: warning at 120 s, critical at 300 s; battery: 20% then 10%; geofence: high then critical). The alert id never changes | `rules/common.py`, `rules/lifecycle.py` |
+| Lifecycle | open -> escalated -> acknowledged -> resolved with a history table; state alerts (loitering, safety) resolve when the condition ends, incident alerts stay open until an operator acts; every alert stores a confidence, a verdict and a recommended action | `rules/lifecycle.py`, `store/derived.py` |
+| Zones | Six: main_gate, driveway, parking_area, warehouse, restricted_zone, garage | `models/base.py` |
+| Schema | Version 5 (additive migrations): v4 added streaming runs, observation provenance, open events, entity match scores, alert status/history/telemetry evidence, scenarios and agent_runs; v5 added indexes for bounded read paths at 10K+ rows | `store/schema.py` |
+| Streaming runtime | `run --scenario NAME` processes one tick at a time; perception tries its providers in order with a timeout per attempt; a frame that every provider fails on is dropped and counted (never invented) and telemetry safety checks carry on | `runtime/`, `agents/` |
+| Sampling | Adaptive: a frame is analysed on scene change, zone change, telemetry change, an open event that has not been looked at for 120 s, or after 300 s without a call; otherwise the last observation is carried forward and labelled as carried. For scripted frames the scene signal is a multiset of (class, activity, attributes), so an activity-only change or an extra identical-looking object is a change | `agents/sampling.py`, `runtime/scene.py` |
+| Analyst | Thirteen read-only tools (`query_events`, `search_events`, `search_frames`, `get_event`, `get_frame`, `get_alert`, `get_evidence`, `entity_history`, `list_entities`, `list_alerts`, `telemetry_at`, `get_timeline`, `summarize_run`) behind the same citation gate | `agent/tools.py` |
+| Scripted versus video | Scripted scenarios run progressively (`run`) or in batch (`ingest`, `build-events`, `analyze`) with the same final result. A real video only has the batch path today: frames are described first, events and alerts are derived afterwards | `runtime/`, `video/ingest.py` |
+| Alert resolution | A loitering alert resolves when the event closes because the object was no longer seen in the zone or the camera moved to another zone; a run that simply ends leaves it open. A camera move is treated as a departure, which is a simplification: the last frame of the zone still showed the person | `models/event.py`, `rules/loitering.py` |
 
 ---
 
@@ -253,7 +280,7 @@ a VLM describing the same vehicle as "blue" then "black" produces two entities. 
 position (M1 assumption), so an event is "seen while the drone was in this zone", not a precise location.
 Thresholds are tuned by hand on two scripted scenarios; there is no evaluation on real footage yet.
 
-## Persistence (schema version 2)
+## Persistence (introduced in schema version 2; the current schema is version 5, see "Current state")
 Added tables (`store/schema.py`): `events`, `event_observations` (evidence: event -> observation, chronological
 `position`; frames come through the observation), `entities`, `entity_events` (`event_id` UNIQUE: an event belongs to
 at most one entity). Foreign keys enforce `entity -> events -> observations -> frames`. Duration and evidence counts
@@ -295,7 +322,7 @@ behind it. No LLM is called, and none may create, suppress, escalate or change a
 "detect threats with AI"; it flags patterns (dwell time, time of day, repetition, zone) that a person configured as
 worth attention, on top of noisy VLM descriptions. The analyst layer (M6) may only *explain* alerts.
 
-## The four rules (defaults from `config/security_rules.yaml`)
+## The four camera rules (defaults from `config/security_rules.yaml`; M9b added four telemetry rules, see "Current state")
 | Rule | Fires when | Default configuration | Severity | Alert id |
 |---|---|---|---|---|
 | `loitering` | an event of a monitored type in a monitored zone has `duration_seconds >= threshold_seconds` | person; `main_gate` 300 s | medium | `ALR-LOITER-<event>` |
@@ -358,7 +385,7 @@ Fixed per rule and set in the YAML: restricted-zone entry `high`, loitering `med
 repeat vehicle `low` (a coarse, similarity-based signal). There is no automatic escalation and no scoring; changing a
 severity is a config edit. No LLM is involved.
 
-## Persistence (schema version 3)
+## Persistence (introduced in schema version 3; the current schema is version 5, see "Current state")
 Added tables: `alerts` (id, rule, severity CHECK-constrained to the four levels, title, message, `triggered_at`,
 `first_seen`, `last_seen` with UTC keys, zone, `entity_id` FK, `facts_json`) and `alert_events` (alert -> event FK). Only links are
 stored: an alert's frames are derived through `alert_events -> event_observations -> observations`, so the chain

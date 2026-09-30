@@ -58,7 +58,7 @@ Objects reported per sample (frame, offset, people / vehicles): 0 (0 s) 2 / 3; 7
 | Vehicle entities | **11** coarse "similar ..." groups; 10 have one appearance and 1 (ENT-V-002, a similar white van) has two |
 | Alerts | **0** |
 
-**Why zero alerts is expected, and what it does NOT mean.** None of the four rules could fire on this input, for reasons unrelated to what the footage shows:
+**Why zero alerts is expected, and what it does NOT mean.** None of the four camera rules could fire on this input (the run was recorded before the telemetry-safety rules existed, and its telemetry is simulated), for reasons unrelated to what the footage shows:
 loitering needs an event of at least 300 s in `main_gate` (the clip lasts 24.68 s and the longest event is 15 s); after-hours presence does not apply because the simulated start is 14:00
 (closed hours are 22:00-06:00); the simulated zone is not restricted; and repeat-vehicle needs three separate appearances (the maximum here is two). Zero alerts is therefore not a
 security-detection result, not a specificity measurement and not evidence that nothing noteworthy happened. Any alert on this clip would equally be a consequence of the simulated time and

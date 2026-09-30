@@ -391,3 +391,24 @@ claim checker verdicts, generated observations, scale smoke run and exponent mat
 - Verifying the replay command showed that replayed observations are identical to the recorded run except the `source` label (`cassette` instead of `gemini:gemini-3.6-flash`); this is documented rather than changed.
 - The document deliberately separates what the run validates (end-to-end integration on real video) from what it does not (perception accuracy, security performance).
 
+
+## M9 to M13 and the dashboard: later milestones (summary only)
+**Tool:** Claude Code (Claude Sonnet 5.5), in the same workflow as M0 to M8 (milestone specification from me, generation by the assistant, separate commits). The commits are `e06b1d6` (M9a, schema v4), `c93cc9a` (M9b, escalation ladders, drone-safety rules, alert lifecycle), `e695bcd` (M9c, scored vehicle re-identification), `8af9457` (M10, streaming patrol engine, adaptive sampling, perception agent), `33e2ad8` (M11, ground-truth scenarios and the sampler/noise experiments), `465ab59` (M12, hardened analyst), `b3e81ac` (M13, scale benchmark, schema v5) and `5df9544` to `cffa515` (the offline dashboard and its frontend/backend layout).
+
+**Not recorded here:** unlike M0 to M8, these milestones do not yet have per-milestone entries listing the alternatives I rejected or the mutation checks run. I have not reconstructed them from memory; the commit history and the tests are the record.
+
+## Audit and remediation pass against the assignment
+**Tool:** Claude Code (Claude Sonnet 5.5), asked to audit the repository against the assignment PDF and fix only what the PDF requires, treating an earlier audit file as a list of claims to verify, not as instructions.
+
+**What was verified and changed**
+- *Scene signature for scripted frames* (`runtime/scene.py`): the signal that decides whether a scripted frame needs a fresh perception call ignored each object's activity and collapsed repeated identical objects, so an activity-only change or a second identical-looking person was carried over from the previous frame. It is now a multiset of (class, activity, attributes). Two new tests fail on the old code and pass on the new.
+- *Analyst prompt* (`agent/prompt.py`): the summary prompt told the model to call `get_run_summary`, which is not a registered model tool (`summarize_run` is). The prompt now names the registered tool, and a test checks that every tool a prompt names is registered.
+- *F1 scoring* (`eval/ground_truth.py`): F1 was reported as undefined when there were no true positives but some false positives or misses. It is now 2TP / (2TP + FP + FN), which is 0 in that case and undefined only when nothing was at stake.
+- *Evaluation fixtures* (`eval/grounding_exp.py`): two adversarial citation cases were labelled "reject" although the M12 formatting-only citation repair now (intentionally) accepts them using ids that were actually retrieved; the labels were corrected.
+- *Documentation and report*: README, feature spec, architecture, testing and evaluation documents and the PDF report were brought up to the current eight rules, six zones, schema v5, thirteen tools and 963 tests; the evaluation snapshot was regenerated (report preparation had been failing on a stale snapshot), and the report gained ground-truth and adaptive-sampling sections.
+
+**What was considered and deliberately not changed:** treating a camera move as proof that a loiterer left (changing it alters the headline demo output and is not something the assignment asks for, so it is documented as a simplification); running real-video frames through the progressive engine (the assignment's simulated text-frame path already does this, so the real-video path is documented as batch); semantic validation of analyst claims, perception-hang recovery and incremental-runtime benchmarks (optional hardening, not assignment requirements).
+
+**Honest notes**
+- All model-related checks here are mocked or replayed; no live or paid model call was made, so nothing in this pass says anything about real model quality.
+- I can attest to this pass because I performed it; I cannot independently verify how the earlier milestones were produced beyond what their entries and commits record.

@@ -89,8 +89,8 @@
 <h2 id="s1">1. Executive summary</h2>
 <p><strong>What was built.</strong> A Python prototype of a drone security analyst for a fixed property. It takes scripted text-frame scenarios or real video, joins each frame to <em>simulated</em>
 telemetry, records what is seen as observations in a SQLite frame-by-frame index (with FTS5 search), merges repeated detections into temporal events, groups separate vehicle events into coarse
-&ldquo;similar vehicle&rdquo; entities, applies four deterministic security rules to produce evidence-linked alerts, and lets an analyst answer questions and summarise the run with explicit citations to stored evidence.
-It is driven from a command-line interface, and an offline, deterministic evaluation harness measures its components.</p>
+&ldquo;similar vehicle&rdquo; entities, applies eight deterministic rules (four over camera events, four over drone telemetry) to produce evidence-linked alerts with severity ladders, recommended actions and a lifecycle, and lets an analyst answer questions and summarise the run with explicit citations to stored evidence.
+It is driven from a command-line interface (a scripted patrol can also run progressively, raising alerts tick by tick), a small offline dashboard shows the stored evidence, and an offline, deterministic evaluation harness measures its components.</p>
 <p><strong>Core architecture.</strong> <code>FRAME &rarr; OBSERVATION &rarr; EVENT &rarr; MEMORY &rarr; REASONING</code>. Frames are never judged in isolation: observations are aggregated into events with duration, vehicle events are
 linked into coarse entities, and rules reason over events and entities. A frame-change gate avoids sending near-identical frames to the vision model, and a cassette layer records and replays model responses so that
 demonstrations and tests are reproducible without a key.</p>
@@ -113,13 +113,13 @@ architecture, tests, a report and demonstration videos (coverage table in Append
 <caption>Explicit assumptions</caption>
 <thead><tr><th>Area</th><th>Assumption</th></tr></thead>
 <tbody>
-<tr><td>Property</td><td>One fixed property, one drone, one patrol per run; five zones: <code>main_gate</code>, <code>driveway</code>, <code>parking_area</code>, <code>warehouse</code>, <code>restricted_zone</code>.</td></tr>
+<tr><td>Property</td><td>One fixed property, one drone, one patrol per run; six zones: <code>main_gate</code>, <code>driveway</code>, <code>parking_area</code>, <code>warehouse</code>, <code>restricted_zone</code>, <code>garage</code>.</td></tr>
 <tr><td>Telemetry</td><td><strong>Simulated</strong>: a seeded simulator (or a timeline you supply) produces position, altitude, battery and zone. A video carries none. An object&rsquo;s zone is the drone&rsquo;s zone when the frame was captured.</td></tr>
 <tr><td>Time</td><td>Video time is mapped onto a simulated wall clock, so time-of-day rules (for example crossing midnight) work on any clip. &ldquo;Real time&rdquo; means streaming aggregation on this simulated clock, not a live feed.</td></tr>
 <tr><td>Observations</td><td>Scripted scenarios use authored text descriptions as deterministic ground truth for tests; real video is described by a vision model behind the same provider interface. Model output is treated as noisy.</td></tr>
 <tr><td>Identity</td><td>No face recognition and no personal identification. Vehicles are grouped only by coarse attributes (colour, body type) and always described as &ldquo;similar&rdquo;; people are never linked across events.</td></tr>
 <tr><td>Access</td><td>The core pipeline, tests and offline demonstrations need no API key or network. Gemini is optional and configured through environment variables only.</td></tr>
-<tr><td>Scope</td><td>Explicitly out of scope: web front end, embeddings or vector search, YOLO or multi-object tracking, multi-drone, real MAVLink/RTSP integration, face recognition, Docker/CI, LangGraph.</td></tr>
+<tr><td>Scope</td><td>Explicitly out of scope: embeddings or vector search, YOLO or multi-object tracking, multi-drone, real MAVLink/RTSP integration, face recognition, Docker/CI, LangGraph. (The local read-only dashboard, battery and geofence rules and a 10K/100K benchmark were first postponed and later built.)</td></tr>
 </tbody></table>
 
 <!-- ============================================================ 3 -->
@@ -137,8 +137,9 @@ architecture, tests, a report and demonstration videos (coverage table in Append
 <tr><td>Telemetry association</td><td>Nearest-prior sample joined to each frame; stale when older than a threshold.</td><td><code>telemetry/</code></td></tr>
 <tr><td>Observation index</td><td>SQLite tables and an FTS5 index; every derived table links back to observations and frames.</td><td><code>store/</code></td></tr>
 <tr><td>Event aggregation and entity linking</td><td>Repeated detections become events with duration; separate vehicle events form coarse entities.</td><td><code>pipeline/</code></td></tr>
-<tr><td>Rule engine</td><td>Four deterministic rules with YAML thresholds produce alerts with evidence.</td><td><code>rules/</code></td></tr>
-<tr><td>Analyst</td><td>Read-only tools, a template analyst, an optional LangChain + Gemini loop, a citation gate.</td><td><code>agent/</code></td></tr>
+<tr><td>Rule engine and alert lifecycle</td><td>Eight deterministic rules with YAML thresholds (four camera, four telemetry-safety) produce alerts with evidence, severity ladders, recommended actions and a status history (open, escalated, acknowledged, resolved).</td><td><code>rules/</code></td></tr>
+<tr><td>Streaming runtime</td><td><code>run</code> consumes telemetry and scripted frames tick by tick: an adaptive sampler decides which frames need a perception call, a perception agent (timeout, fallback, guard) returns observations, the context engine updates events and entities, and rules run after every tick so alerts are saved and printed as they fire.</td><td><code>runtime/</code>, <code>agents/</code></td></tr>
+<tr><td>Analyst</td><td>Thirteen read-only tools, a template analyst, an optional LangChain + Gemini loop, a citation gate.</td><td><code>agent/</code></td></tr>
 <tr><td>Evaluation harness</td><td>Offline, deterministic experiments and an ablation table; production code does not depend on it.</td><td><code>eval/</code></td></tr>
 </tbody></table>
 <p><strong>Trust boundary.</strong> Rules decide; the LLM explains and answers from tool output only. LangChain is imported in one file (<code>agent/llm.py</code>); the video, vision, pipeline, rules, store, model and telemetry packages
@@ -148,7 +149,7 @@ never import it, and an automated test enforces this, so the deterministic pipel
 <h2 id="s4">4. Data and memory design</h2>
 <figure>
 {{SVG_DATAMODEL}}
-<figcaption>Figure 2. Stored data and evidence relationships (schema version 3). Links are enforced with SQLite foreign keys.</figcaption>
+<figcaption>Figure 2. Stored data and evidence relationships (core tables; the current schema is version 5). Links are enforced with SQLite foreign keys.</figcaption>
 </figure>
 <table class="data">
 <caption>Tables</caption>
@@ -161,7 +162,9 @@ never import it, and an automated test enforces this, so the deterministic pipel
 <tr><td><code>observations_fts</code></td><td>FTS5 index over description, an objects text (type, activity, attribute values) and the zone name; tokenizer <code>porter unicode61</code>.</td></tr>
 <tr><td><code>events</code>, <code>event_observations</code></td><td>Derived events (type, zone, first/last seen, attributes, activities, close reason) and their ordered evidence links.</td></tr>
 <tr><td><code>entities</code>, <code>entity_events</code></td><td>Derived coarse vehicle entities and their member events.</td></tr>
-<tr><td><code>alerts</code>, <code>alert_events</code></td><td>Rule output: rule, severity, reason, the numbers the rule compared, triggering events and optional entity.</td></tr>
+<tr><td><code>alerts</code>, <code>alert_events</code></td><td>Rule output: rule, severity, status, reason, the numbers the rule compared, confidence, verdict, recommended action, severity ladder, triggering events and optional entity.</td></tr>
+<tr><td><code>alert_history</code>, <code>alert_telemetry</code></td><td>The lifecycle (raised, escalated, acknowledged, resolved, with who and when) and the telemetry samples that support a drone-safety alert.</td></tr>
+<tr><td><code>scenarios</code>, <code>agent_runs</code></td><td>Which scenario a streaming run processed, and the run&rsquo;s status, metrics and per-frame trace.</td></tr>
 </tbody></table>
 <h3>Design notes</h3>
 <ul>
@@ -213,20 +216,25 @@ never import it, and an automated test enforces this, so the deterministic pipel
 
 <!-- ============================================================ 7 -->
 <h2 id="s7">7. Security detection rules</h2>
-<p>Rules are deterministic functions over stored events and entities, configured in <code>config/security_rules.yaml</code>. They decide whether an alert exists; no LLM takes part. Each alert carries a reason, the numbers the rule compared, and links to the triggering events, the entity (if any) and the frames.</p>
+<p>Rules are deterministic functions over stored events, entities and telemetry, configured in <code>config/security_rules.yaml</code>. They decide whether an alert exists; no LLM takes part. Each alert carries a reason, the numbers the rule compared, and links to the triggering events, the entity (if any) and the frames.</p>
 <table class="data">
-<caption>The four rules (default configuration)</caption>
+<caption>The eight rules (default configuration)</caption>
 <thead><tr><th>Rule</th><th>Fires when</th><th>Severity</th></tr></thead>
 <tbody>
-<tr><td>Loitering</td><td>a person event in <code>main_gate</code> lasts at least 300 s (the boundary is inclusive)</td><td>medium</td></tr>
+<tr><td>Loitering</td><td>a person event in <code>main_gate</code> lasts at least 120 s (inclusive); the same alert escalates to critical at 300 s</td><td>medium, then critical</td></tr>
 <tr><td>After-hours presence</td><td>a person event overlaps the closed window 22:00-06:00 (start inside, end outside; the window crosses midnight); time of day uses the event&rsquo;s own UTC offset unless a property offset is configured</td><td>medium</td></tr>
 <tr><td>Repeat vehicle</td><td>a coarse vehicle entity has at least 3 separate appearances; the wording is &ldquo;a <em>similar</em> &hellip; was observed in N separate appearances&rdquo; and says a coarse match does not confirm the same vehicle</td><td>low</td></tr>
 <tr><td>Restricted-zone entry</td><td>a person or vehicle event occurs in <code>restricted_zone</code></td><td>high</td></tr>
+<tr><td>Low battery (telemetry)</td><td>battery at or below 20%; critical at or below 10%; resolves once back at 25% or more</td><td>medium, then critical</td></tr>
+<tr><td>Signal loss (telemetry)</td><td>signal below 40% is degraded, below 15% is lost, and a gap of more than 30 s in delivered telemetry counts as a lost link</td><td>medium, then high</td></tr>
+<tr><td>Altitude anomaly (telemetry)</td><td>altitude outside 5-120 m; beyond 2 m or 150 m it is high</td><td>medium, then high</td></tr>
+<tr><td>Geofence violation (telemetry)</td><td>the drone is more than 100 m from the property centre; critical beyond 150 m</td><td>high, then critical</td></tr>
 </tbody></table>
 <ul>
-<li><strong>Identifiers and duplicates.</strong> Alert ids are deterministic, <code>ALR-&lt;RULE&gt;-&lt;subject&gt;</code>, and an identical (rule, subject) pair yields exactly one alert; re-running on unchanged data gives the same alerts.</li>
-<li><strong>Severity</strong> is fixed per rule; there is no scoring or automatic escalation. Different rules may alert on the same event because they describe different risks (a night-time loiterer yields a loitering and an after-hours alert).</li>
-<li><strong>Evidence.</strong> <code>alerts --show &lt;id&gt;</code> prints the reason, the rule facts and the evidence chain down to frames.</li>
+<li><strong>Identifiers and duplicates.</strong> Alert ids are deterministic, <code>ALR-&lt;RULE&gt;-&lt;subject or episode&gt;</code>, and an identical (rule, subject or episode) pair yields exactly one alert; re-running on unchanged data gives the same alerts.</li>
+<li><strong>Severity ladders and lifecycle.</strong> A rule may raise an alert at one severity and escalate the <em>same</em> alert when the condition worsens (loitering: warning at 120 s, critical at 300 s); the alert id never changes. Each alert has a status history (open, escalated, acknowledged, resolved), a confidence, a verdict and a recommended action written for the rule and severity. State alerts (loitering, safety) resolve when the condition ends; incident alerts (after hours, repeat vehicle, restricted zone) stay open until an operator acts, and only a rule or an operator changes a status, never a language model. A loitering alert also resolves when its event closes because the camera moved to another zone, which is a simplification: the last frame in the zone still showed the person. Different rules may alert on the same event because they describe different risks (a night-time loiterer yields a loitering and an after-hours alert).</li>
+<li><strong>Evidence.</strong> <code>alerts --show &lt;id&gt;</code> prints the reason, the rule facts and the evidence chain down to frames (or, for drone-safety alerts, telemetry samples).</li>
+<li><strong>Progressive processing.</strong> <code>run --scenario NAME</code> drives the same rules one tick at a time. Alerts are stored and printed the moment they fire, and with sampling switched off the final database equals the batch pipeline&rsquo;s (a test asserts it for the two main scenarios). Only scripted scenarios run progressively; a real video is ingested first and turned into events and alerts by <code>build-events</code> and <code>analyze</code>.</li>
 <li><strong>Documented false positives and negatives</strong> include a delivery driver waiting at the gate (loitering), authorised night staff (there is no allow-list), a person missed for longer than the tolerance splitting into events that stay under the threshold, and thresholds that were hand-set on scripted data rather than validated on real footage.</li>
 </ul>
 
@@ -238,7 +246,7 @@ never import it, and an automated test enforces this, so the deterministic pipel
 </figure>
 <h3>8.1 Tools and the tool loop</h3>
 <ul>
-<li>The analyst reaches the database only through ten read-only, bounded tools: <code>search_observations</code>, <code>list_events</code>, <code>get_event</code>, <code>get_event_evidence</code>, <code>list_entities</code>, <code>get_entity</code>, <code>get_entity_history</code>, <code>list_alerts</code>, <code>get_alert</code>, <code>get_run_summary</code>. There is no SQL or generic execution tool; invalid arguments return an error object instead of raising.</li>
+<li>The analyst reaches the database only through thirteen read-only, bounded tools: <code>query_events</code>, <code>search_events</code>, <code>search_frames</code>, <code>get_event</code>, <code>get_frame</code>, <code>get_alert</code>, <code>get_evidence</code>, <code>entity_history</code>, <code>list_entities</code>, <code>list_alerts</code>, <code>telemetry_at</code>, <code>get_timeline</code>, <code>summarize_run</code>. There is no SQL or generic execution tool; invalid arguments return an error object instead of raising.</li>
 <li>Every result has an explicit bound (default 8 and at most 15 observations per search; 20 events, alerts or entities; 15 evidence observations per event; descriptions cut to 200 characters) and reports <code>total</code>, <code>returned</code> and <code>truncated</code>.</li>
 <li>With an LLM configured, a LangChain chat model (Gemini) runs a hand-written tool-calling loop bounded to 6 model rounds and 12 tool calls per answer. LangChain provides only the model and tool binding; there is no agent framework. The analyst model is configured separately from the vision model (<code>ANALYST_MODEL</code>).</li>
 <li>The system prompt requires: facts only from tools, inline citations, observation kept apart from inference, &ldquo;similar&rdquo; vehicle wording, no claim that the same person appears in separate events, no identity or intent claims, alerts reported exactly as stored, and &ldquo;Insufficient evidence&rdquo; when the evidence does not support an answer.</li>
@@ -314,8 +322,16 @@ never import it, and an automated test enforces this, so the deterministic pipel
 
 <h3>9.8 Ablation summary <span class="tag ctrl">Controlled / synthetic</span></h3>
 {{TBL_ABLATION}}
-<h3>9.9 Scalability</h3>
-<p>Generated-observation timings at 100, 1,000, 10,000 and 50,000 observations are in Section 11 (<span class="tag mach">Measured on this machine</span>).</p>
+<h3>9.9 Streaming ground truth <span class="tag ctrl">Controlled / synthetic</span></h3>
+<p><strong>Question.</strong> Does a progressive run reproduce the events, alerts, severity ladders and timing that each scenario&rsquo;s author wrote down beforehand? <strong>Method.</strong> {{V.gt_scenarios}} scenario files carry a machine-readable <code>expect:</code> block written before the system was run against them (camera scenarios such as a midnight loiterer, an intruder walking to the garage, a repeat pickup, a benign delivery and a flickering detector, and emergency scenarios for low battery, signal loss and a geofence violation). Each is run through the streaming engine with the default rules and the adaptive sampler on and matched one to one with its labels. F1 is 2TP / (2TP + FP + FN), so a scenario whose every prediction is wrong scores 0, not N/A.</p>
+{{TBL_GT}}
+<p><strong>Measured.</strong> {{V.gt_exact}} of {{V.gt_scenarios}} scenarios matched exactly, with {{V.gt_tp}} true positives, no false positives and no false negatives over all expected alerts; the severity ladder, rung timing and final lifecycle status were all right. Detection latency is bounded by the frame spacing (60 s) for camera alerts and the 10 s telemetry tick for safety alerts. <strong>Limits.</strong> Labels and rules share an author and detections are perfect, so this shows the implementation matches its author&rsquo;s intent, not real-world accuracy.</p>
+<h3>9.10 Adaptive sampling <span class="tag ctrl">Controlled / synthetic</span></h3>
+<p><strong>Question.</strong> Does combining pixel change, telemetry change, event state and a staleness bound detect more meaningful changes per model call than a pixel gate? <strong>Method.</strong> Eight seeded 600-frame generated streams with small, medium and large changes and illumination steps, using the real gate score and the real sampler. The saving is reported together with the changes missed.</p>
+{{TBL_SAMPLER}}
+<p><strong>Reading.</strong> The previous pixel-only default avoided the most calls and missed the most meaningful changes; adaptive sampling bought recall with calls, and the fair comparison is a pixel gate with a fixed refresh. For scripted frames, which have no pixels, the sampler&rsquo;s scene signal is a multiset of object class, activity and attributes, so an activity-only change or an extra identical-looking object counts as a change. <strong>Limits.</strong> Synthetic streams and an assumed 30% telemetry-cue rate; the adaptive sampler is used by the scripted runtime, while real video still uses the pixel gate alone.</p>
+<h3>9.11 Scalability</h3>
+<p>Generated-observation timings at 100, 1,000, 10,000 and 50,000 observations are in Section 11 (<span class="tag mach">Measured on this machine</span>); a later benchmark of the real pipeline and the analyst tools at 10,000 and 100,000 observations is committed under <code>bench/</code>.</p>
 
 <!-- ============================================================ 10 -->
 <h2 id="s10">10. Real-video experiment <span class="tag real">Real video</span></h2>
@@ -345,7 +361,7 @@ never import it, and an automated test enforces this, so the deterministic pipel
 <tr><td>Alerts</td><td><strong>0</strong></td></tr>
 </tbody></table>
 <h3>10.1 Why there are zero alerts</h3>
-<p>None of the four rules could fire on this input, for reasons unrelated to what the footage shows: loitering needs an event of at least 300 s in <code>main_gate</code> (the clip lasts 24.68 s and the longest event is 15 s); after-hours presence does not apply because the simulated start is 14:00 and closed hours are 22:00-06:00; the simulated zone is not restricted; and repeat vehicle needs three separate appearances (the maximum here is two). Zero alerts is <strong>not</strong> a security-detection result, not a specificity measurement and not evidence that nothing noteworthy happened. Any alert on this clip would equally be a consequence of the simulated time and zone, not of the footage.</p>
+<p>None of the four camera rules could fire on this input (the run was recorded before the telemetry-safety rules existed, and its telemetry is simulated), for reasons unrelated to what the footage shows: loitering needs an event of at least 300 s in <code>main_gate</code> (the clip lasts 24.68 s and the longest event is 15 s); after-hours presence does not apply because the simulated start is 14:00 and closed hours are 22:00-06:00; the simulated zone is not restricted; and repeat vehicle needs three separate appearances (the maximum here is two). Zero alerts is <strong>not</strong> a security-detection result, not a specificity measurement and not evidence that nothing noteworthy happened. Any alert on this clip would equally be a consequence of the simulated time and zone, not of the footage.</p>
 <h3>10.2 Findings</h3>
 <ol>
 <li><strong>Event fragmentation from free-text attributes.</strong> Person events require the <code>clothing</code> text to match after lower-casing. Gemini&rsquo;s wording varies (&ldquo;dark clothing&rdquo;, &ldquo;dark coat&rdquo;, &ldquo;dark coat, jeans&rdquo;, &ldquo;dark jacket and jeans&rdquo;, &hellip;), so most detections start their own event. A frame can hold up to three people and three vehicles and the observations carry no position, so which object is which cannot be inferred; an event unmatched for 3 consecutive sampled frames (9 s) closes. Result: 20 of 25 events are single-frame.</li>
@@ -370,22 +386,25 @@ never import it, and an automated test enforces this, so the deterministic pipel
 
 <!-- ============================================================ 12 -->
 <h2 id="s12">12. Testing <span class="tag test">Automated tests</span></h2>
-<p><strong>Current result.</strong> At submission preparation, <strong>538 tests pass</strong>; the suite ran in roughly 40-45 seconds on the development machine, all offline. <code>ruff check</code> and <code>ruff format --check</code> pass.</p>
+<p><strong>Current result.</strong> <strong>{{V.n_tests}} tests</strong> are collected and pass, all offline, in roughly 30 to 90 seconds on the development machine.</p>
 <table class="data">
-<caption>Test organisation (22 test modules)</caption>
+<caption>Test organisation ({{V.n_test_modules}} test modules)</caption>
 <thead><tr><th>Area</th><th>Modules</th><th>What is verified</th></tr></thead>
 <tbody>
 <tr><td>Domain and simulation</td><td>models, clock, telemetry simulator, sync, scenario, simulate</td><td>strict immutable models, timezone-aware time, seeded determinism, midnight crossing, dropouts and the stale-telemetry boundary, scenario validation</td></tr>
 <tr><td>Storage and indexing</td><td>store, ingest</td><td>schema and foreign keys, exact round trips, timezone-safe ordering, filters, FTS5 ranking and safe search text, atomic ingest, CLI queries</td></tr>
 <tr><td>Events and entities</td><td>aggregator, linker, build_events</td><td>evidence and duration, missed-frame tolerance, gap and zone splits, attribute compatibility, coarse linking, plate rules, people never linked, idempotent rebuilds, schema upgrades</td></tr>
 <tr><td>Rules and alerts</td><td>rules, analyze</td><td>inclusive loitering boundary, after-hours window edges and midnight crossing, repeat vehicle, restricted zone, de-duplication, evidence chain, alert CLI</td></tr>
+<tr><td>Emergencies and lifecycle</td><td>safety_rules, lifecycle</td><td>low battery warning, critical and hysteresis; degraded, lost and dropped-out signal; altitude envelope; geofence; escalation of the same alert; operator acknowledge and resolve; illegal transitions refused</td></tr>
+<tr><td>Progressive runtime (dynamic inputs)</td><td>runtime, sampling, perception, cli_run, context_engine</td><td>tick ordering and pacing, alerts persisted while a run is in progress, streaming equals batch, sampling reasons, activity-only and count-only scene changes, perception timeout and fallback, the <code>run</code> command</td></tr>
 <tr><td>Video and providers</td><td>video, video_ingest, cassette, gemini</td><td>unusable files, sampling plans, gate behaviour, carry-forward versus drop, cassette record/replay/miss/mismatch, provider-output validation, Gemini key handling, retries and error classification (SDK mocked)</td></tr>
-<tr><td>Analyst</td><td>agent_core, agent_llm, agent_truncation</td><td>bounded read-only tools, citation validation (nonexistent, unretrieved, malformed, unknown-type, missing, wording), retry then fallback, sessions, LangChain adapter with a fake chat model, truncation notices</td></tr>
-<tr><td>Evaluation and repository rules</td><td>eval, scaffold</td><td>harness determinism, metric maths and zero denominators, experiment mechanics, serialization, no network or key; core packages do not import LangChain</td></tr>
+<tr><td>Analyst</td><td>agent_core, agent_llm, agent_truncation, analyst_m12</td><td>bounded read-only tools, citation validation (nonexistent, unretrieved, malformed, unknown-type, missing, wording), retry then fallback, sessions, LangChain adapter with a fake chat model, truncation notices</td></tr>
+<tr><td>Evaluation and repository rules</td><td>eval, ground_truth, sampler_noise_eval, scale_bench, scaffold</td><td>harness determinism, metric maths and zero denominators (F1 is 0, not N/A, when everything is wrong), ground-truth scoring, experiment mechanics, serialization, no network or key; core packages do not import LangChain</td></tr>
+<tr><td>Dashboard</td><td>web_api, web_server, web_guard, web_bundle</td><td>read-only JSON API, localhost-only guard, static bundle, frame images</td></tr>
 </tbody></table>
 <ul>
 <li><strong>Offline and mocked boundaries.</strong> No test needs a key or a network connection. The Gemini SDK is replaced by a fake client and the analyst model by a scripted stand-in or a fake chat model; a developer&rsquo;s real <code>.env</code> is never read by tests.</li>
-<li><strong>Regression strategy.</strong> The shipped scenarios pin known facts (<code>security_events</code>: 7 events, 2 vehicle entities, 1 with several appearances, 6 alerts; <code>normal_day</code>: none). Fourteen offline analyst answers recorded before the truncation fix must stay byte-identical when nothing is truncated. Mutation checks (deliberately breaking the code to see whether the tests notice) were used during development.</li>
+<li><strong>Regression strategy.</strong> The shipped scenarios pin known facts (<code>security_events</code>: 7 events, 2 vehicle entities, 1 with several appearances, 7 alerts including a telemetry signal-loss alert; <code>normal_day</code>: none). Offline analyst answers recorded before the truncation fix must stay byte-identical when nothing is truncated. Mutation checks (deliberately breaking the code to see whether the tests notice) were used during development.</li>
 <li><strong>Evaluation tests</strong> check that the harness computes what it claims and reproduces itself; they assert no timing thresholds and no tuned quality numbers.</li>
 <li><strong>Clean-clone verification.</strong> The procedure is documented in <code>docs/testing.md</code>: clone into a fresh directory, create a virtual environment, <code>pip install -e ".[dev,agent]"</code>, run the tests and linter, then run the scripted demonstration and the evaluation; expect a clean git status because generated files are ignored. This report does not state its outcome; it is run and recorded at submission.</li>
 <li><strong>Not covered.</strong> Live Gemini behaviour (live runs were separate, individually approved steps described in Section 15), perception accuracy, field performance, and the semantic truth of analyst prose.</li>
@@ -408,7 +427,8 @@ never import it, and an automated test enforces this, so the deterministic pipel
 <tr><td>One-machine scalability</td><td>Timings come from one machine and session on synthetic data, exclude vision-model latency, and show a superlinear entity-linking stage whose cause was not tested.</td></tr>
 <tr><td>Confidence is a placeholder</td><td>Stored confidence (0.5) is a constant, not a probability, and is not used for decisions.</td></tr>
 <tr><td>Template analyst</td><td>Pattern-matched, not language understanding; the vehicle search only sees the first 20 entities the tool returns (and now says so).</td></tr>
-<tr><td>Offline replay, not real time</td><td>&ldquo;Real-time&rdquo; behaviour is streaming aggregation on a simulated clock; no live feed was tested.</td></tr>
+<tr><td>Offline replay, not real time</td><td>&ldquo;Real-time&rdquo; behaviour is streaming aggregation on a simulated clock; no live feed was tested. Alerts are raised progressively only for scripted scenarios (<code>run</code>); a real video is ingested first, and its events and alerts are derived afterwards by <code>build-events</code> and <code>analyze</code>.</td></tr>
+<tr><td>Loitering resolution</td><td>A loitering alert resolves when its event closes, including when the camera moves to another zone; the last frame in the zone still showed the person, so this is a simplification, not proof of departure.</td></tr>
 </tbody></table>
 
 <!-- ============================================================ 14 -->
@@ -440,6 +460,13 @@ never import it, and an automated test enforces this, so the deterministic pipel
 <tr><td>M7</td><td><code>560c7c3</code> (tag <code>m7-final-baseline</code>)</td><td>evaluation, ablations and grounding analysis</td></tr>
 <tr><td>M8a / M8b</td><td><code>0ae7414</code> / <code>7589c2c</code></td><td>explicit truncation in the offline analyst / real-video experiment documentation</td></tr>
 <tr><td>M8d</td><td><code>18bf196</code>, <code>61bc003</code></td><td>documentation reconciliation; neutral placeholder test credentials</td></tr>
+<tr><td>M9a / M9b / M9c</td><td><code>e06b1d6</code> / <code>c93cc9a</code> / <code>e695bcd</code></td><td>schema v4 for streaming runs / escalation ladders, drone-safety rules and alert lifecycle / scored, indexed vehicle re-identification</td></tr>
+<tr><td>M10</td><td><code>8af9457</code></td><td>streaming patrol engine, adaptive sampling, perception agent, live view</td></tr>
+<tr><td>M11</td><td><code>33e2ad8</code></td><td>ground-truth scenarios, alert-latency scoring, adaptive-sampling and noise experiments</td></tr>
+<tr><td>M12</td><td><code>465ab59</code></td><td>hardened analyst: planner, replay, telemetry tools, per-sentence citation gate</td></tr>
+<tr><td>M13</td><td><code>b3e81ac</code></td><td>scale benchmark and bounded read paths (schema v5)</td></tr>
+<tr><td>Dashboard</td><td><code>5df9544</code> to <code>cffa515</code></td><td>offline evaluator dashboard, then the frontend/backend layout</td></tr>
+<tr><td>Audit pass</td><td>this revision</td><td>requirements-to-implementation audit against the assignment: scene-signature fix, prompt and tool-registry fix, F1 boundary fix, refreshed documentation, evaluation snapshot and this report</td></tr>
 </tbody></table>
 <h3>Validation approach and decisions</h3>
 <ul>
@@ -466,7 +493,7 @@ never import it, and an automated test enforces this, so the deterministic pipel
 
 <!-- ============================================================ 17 -->
 <h2 id="s17">17. Conclusion</h2>
-<p>The prototype implements the requested pipeline end to end: simulated telemetry and video frames become indexed observations, temporal events, coarse vehicle entities and evidence-linked alerts from four deterministic rules, and an analyst answers and summarises with citations that a validator checks against the database. A real vision model (Gemini) integrates through a provider contract with cassette record and replay, and one real clip ran through the entire pipeline.</p>
+<p>The prototype implements the requested pipeline end to end: simulated telemetry and video frames become indexed observations, temporal events, coarse vehicle entities and evidence-linked alerts from eight deterministic rules (raised progressively for a simulated patrol), and an analyst answers and summarises with citations that a validator checks against the database. A real vision model (Gemini) integrates through a provider contract with cassette record and replay, and one real clip ran through the entire pipeline.</p>
 <p>The evaluation shows what each component contributes and where it fails: the frame gate saves calls but is pixel-based and missed small meaningful changes on the fixture; missed-frame tolerance prevents one undetected frame from removing a loitering alert; entity memory enables the repeat rule but can link different vehicles; the rules agree with authored labels on controlled scenarios; and the citation gate rejects the categories it checks while accepting every citation-valid but unsupported answer in the probe. The real-video run validates integration and exposes event fragmentation, inconsistent model attributes and analyst truncation, one of which was fixed.</p>
 <p>These results are measurements on synthetic fixtures, one short real clip and one machine. They do not establish real-world perception accuracy, security-detection performance, entity identity, semantic faithfulness of analyst prose, or production-scale behaviour, and the report makes no such claims.</p>
 
@@ -477,7 +504,7 @@ never import it, and an automated test enforces this, so the deterministic pipel
 <tbody>
 <tr><td>Process simulated telemetry and video frames</td><td>Sections 2, 3, 5; <code>simulate</code>, <code>ingest</code> (scripted frames with seeded telemetry) and <code>ingest-video</code> (real video)</td></tr>
 <tr><td>Identify objects/events and log them with context</td><td>Sections 4-6; observations with zone, time and telemetry; events with duration; Gemini descriptions in Section 10</td></tr>
-<tr><td>Alerts from predefined rules</td><td>Section 7; <code>analyze</code>, <code>alerts --show</code></td></tr>
+<tr><td>Alerts from predefined rules (immediate alerts)</td><td>Section 7; <code>run</code> (progressive), <code>analyze</code>, <code>alerts --show</code>; emergency scenarios in Section 9.9</td></tr>
 <tr><td>Cross-domain frame-by-frame indexing</td><td>Section 4; SQLite <code>frames</code>/<code>observations</code> with FTS5, queried by time, zone, object or keyword</td></tr>
 <tr><td>Feature spec (value, 2-3 requirements)</td><td><code>docs/feature_spec.md</code></td></tr>
 <tr><td>Architecture and design artifacts</td><td>Section 3 and Figures 1-3; <code>docs/architecture.md</code></td></tr>

@@ -12,6 +12,7 @@ Design in one line: `FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING`. **Ru
 - [docs/evaluation.md](docs/evaluation.md): controlled experiments, ablations, metrics, threats to validity
 - [docs/real_video_experiment.md](docs/real_video_experiment.md): one real-video Gemini run through the whole pipeline, its findings and limits
 - [docs/ai_usage.md](docs/ai_usage.md): how AI tools were used, and what I changed or rejected
+- [docs/dashboard.md](docs/dashboard.md): the evaluator dashboard: panels, API, what feeds each panel, safety limits
 
 ## Setup (Python 3.11+)
 ```
@@ -65,6 +66,17 @@ Replaying that cassette (`--provider cassette --cassette ...`) needs no key and 
 ```
 python -m drone_agent evaluate --output output/eval                      # add --scale [--scale-sizes 100,1000,10000] for the timing benchmark
 ```
+
+## Dashboard (evaluator UI)
+A small local web dashboard shows the whole pipeline visually: `Video/Observations -> Event memory -> Entity memory -> Security rules -> Alerts -> AI analyst`.
+It has five panels (security overview, event timeline, alert investigation, AI analyst with follow-ups, video/observations) and runs **offline, read-only, with no model call and no API key**.
+```
+python -m drone_agent.web --demo          # builds the offline demo runs into output/dashboard/, then serves http://127.0.0.1:8765
+```
+`--demo` creates two runs with the existing CLI commands: the scripted `security_events` scenario (**SCRIPTED**: authored text frames, no image) and the synthetic demo video replayed from its canned cassette
+(**SYNTHETIC DEMO**: real pixels, canned descriptions, not a vision model). To add your own run, declare what it is (the kind is never guessed):
+`python -m drone_agent.web --run NAME=DB,kind=scripted|synthetic-demo|real-video[,video=PATH]`. The one real-video experiment (**REAL VIDEO**) is not in the repository (the clip is gitignored); on a machine that has it, register it with `--run`.
+No new dependencies and no Node/npm: a Python standard-library server plus plain HTML/CSS/JS, bound to localhost only. What each panel shows and which existing function feeds it: [docs/dashboard.md](docs/dashboard.md).
 
 ## Architecture overview
 Scripted text frames or a real video (sampled, pixel-gated, described by Gemini or a cassette) become **observations** joined to simulated telemetry, indexed in **SQLite + FTS5**. An

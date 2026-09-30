@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drone Security Analyst Dashboard</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>Drone Security Analyst</h1>
+    <span class="sub">Evaluator dashboard &middot; offline &middot; read-only &middot; no model calls</span>
+  </div>
+  <label class="run-select">Run
+    <select id="run-select" aria-label="Choose a run"></select>
+  </label>
+</header>
+
+<div id="error" class="error" role="alert" hidden></div>
+<div id="kind-banner" class="banner" role="note"></div>
+
+<nav id="pipeline" class="pipeline" aria-label="Pipeline: from video to analyst"></nav>
+
+<main>
+  <section id="panel-overview" class="panel" aria-labelledby="h-overview">
+    <h2 id="h-overview">Security overview</h2>
+    <div id="overview-body" class="loading">Loading&hellip;</div>
+  </section>
+
+  <section id="panel-timeline" class="panel" aria-labelledby="h-timeline">
+    <h2 id="h-timeline">Event timeline</h2>
+    <p class="hint">Events are repeated detections merged in time. Select an event to see the observations behind it.</p>
+    <div id="timeline-body" class="loading">Loading&hellip;</div>
+  </section>
+
+  <section id="panel-alerts" class="panel" aria-labelledby="h-alerts">
+    <h2 id="h-alerts">Alert investigation</h2>
+    <p class="hint">Alerts come from deterministic rules over events. Nothing on this page, and no model, decides whether an alert exists.</p>
+    <div id="alerts-body" class="loading">Loading&hellip;</div>
+  </section>
+
+  <section id="panel-analyst" class="panel" aria-labelledby="h-analyst">
+    <h2 id="h-analyst">AI Security Analyst</h2>
+    <div id="analyst-body" class="loading">Loading&hellip;</div>
+  </section>
+
+  <section id="panel-video" class="panel" aria-labelledby="h-video">
+    <h2 id="h-video">Video / Observations</h2>
+    <div id="video-body" class="loading">Loading&hellip;</div>
+  </section>
+</main>
+
+<footer>
+  <span>Served from localhost only. Every number here is read from the run's SQLite database by the existing backend; this page contains no detection logic.</span>
+</footer>
+<script src="/static/app.js" defer></script>
+</body>
+</html>

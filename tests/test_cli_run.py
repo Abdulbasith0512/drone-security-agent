@@ -93,7 +93,8 @@ def test_no_sampler_analyses_every_frame_and_json_summary_is_written(tmp_path):
 def test_a_stricter_rules_file_changes_what_a_run_alerts_on(tmp_path):
     rules = tmp_path / "rules.yaml"
     rules.write_text(
-        "loitering: {zones: {main_gate: {threshold_seconds: 600}}}\nsignal_loss: {enabled: false}\n",
+        "loitering: {zones: {main_gate: {threshold_seconds: 600}}}\n"
+        "signal_loss: {enabled: false}\n",
         encoding="utf-8",
     )
     db = tmp_path / "strict.db"

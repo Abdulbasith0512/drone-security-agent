@@ -1,0 +1,45 @@
+# The drone drifts east while hovering in the warehouse zone (wind, or a GPS fault: a scripted
+# telemetry anomaly). The drift starts at +176 s and reaches 150 m at +416 s, then the drone returns.
+# The property's geofence is a 100 m circle around (0.0004, 0.00045); the warehouse centre is 28 m
+# inside it. From that geometry (ground truth, worked out BEFORE running the system):
+#   - the drone crosses the 100 m fence at a drift of 80.8 m, i.e. at +305 s, so the first sample
+#     outside is the one at +310 s  -> HIGH at +310 s
+#   - it crosses the 150 m "far outside" ring at a drift of 131.6 m, i.e. at +387 s, so the first
+#     sample beyond it is +390 s      -> escalates to CRITICAL at +390 s
+#   - it is back inside at +420 s, so the alert resolves
+# No camera activity; nothing else may fire. All coordinates are synthetic.
+name: geofence_violation
+description: The drone drifts 150 m out of the geofence and returns; a safety alert with no camera event.
+start: "2026-09-29T10:30:00+05:30"
+telemetry:
+  seed: 17
+  sample_interval_s: 10
+  stale_after_s: 30
+  battery_start_percent: 90
+  battery_drain_percent_per_min: 0.4
+  signal_baseline_percent: 93
+  patrol:
+    - {zone: warehouse, duration_s: 600}   # 10:30-10:40
+  anomalies:
+    - {kind: geofence_drift, start_offset_s: 176, end_offset_s: 416, value: 150}
+frames:
+  - {frame_id: 1, timestamp_offset: 60, zone: warehouse, description: "Warehouse yard, nothing visible"}
+  - {frame_id: 2, timestamp_offset: 180, zone: warehouse, description: "Warehouse yard, nothing visible"}
+  - {frame_id: 3, timestamp_offset: 300, zone: warehouse, description: "Warehouse yard, nothing visible"}
+  - {frame_id: 4, timestamp_offset: 420, zone: warehouse, description: "Warehouse yard, nothing visible"}
+  - {frame_id: 5, timestamp_offset: 540, zone: warehouse, description: "Warehouse yard, nothing visible"}
+expect:
+  alerts:
+    - rule_id: geofence_violation
+      zone: warehouse
+      steps: [{severity: high, at_s: 310}, {severity: critical, at_s: 390}]
+      detect_within_s: 20
+      final_status: resolved
+      note: "outside the fence, then far outside, then back inside"
+  forbidden:
+    - {rule_id: loitering}
+    - {rule_id: after_hours_presence}
+    - {rule_id: restricted_zone_entry}
+    - {rule_id: low_battery}
+    - {rule_id: signal_loss}
+    - {rule_id: altitude_anomaly}

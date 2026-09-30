@@ -882,7 +882,9 @@ def evaluate_command(args: argparse.Namespace, console: Console) -> int:
         sizes = tuple(int(x) for x in args.scale_sizes.split(",") if x.strip())
         if not sizes or any(n < 10 for n in sizes):
             raise ValueError("--scale-sizes must be comma-separated integers >= 10")
-        results = run_all(args.scale, sizes, args.repeats)
+        results = run_all(
+            args.scale, sizes, args.repeats, noise_enabled=args.noise, noise_seeds=args.noise_seeds
+        )
         paths = write_results(results, args.output)
     except (ValueError, OSError) as exc:
         _error(console, str(exc))
@@ -1072,6 +1074,10 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
     ev.add_argument("--scale", action="store_true", help="also run the timing benchmark")
     ev.add_argument("--scale-sizes", default="100,1000,10000", help="observation counts")
     ev.add_argument("--repeats", type=int, default=5, help="timing repeats (median reported)")
+    ev.add_argument(
+        "--noise", action="store_true", help="also run the perception-noise sweep (slower)"
+    )
+    ev.add_argument("--noise-seeds", type=int, default=3, help="seeds per noise cell")
 
     demo = sub.add_parser(
         "make-demo-video", help="write a tiny synthetic test video and a matching demo cassette"

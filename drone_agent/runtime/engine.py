@@ -226,7 +226,7 @@ class PatrolEngine:
                 else {}
             ),
         )
-        self._assess(tick.at, tick.offset_s)
+        self._assess(tick.at, tick.offset_s, camera=False)
 
     def _on_frame(self, tick: Tick) -> None:
         frame = tick.frame
@@ -302,8 +302,7 @@ class PatrolEngine:
                 }
             )
         if obs is None:
-            self._assess(tick.at, tick.offset_s)
-            return
+            return  # nothing new was seen, so no camera rule can change
 
         obs = sync.attach(obs)
         self.store.insert_observation(obs)
@@ -331,7 +330,7 @@ class PatrolEngine:
             carried=obs.source.endswith("+carried"),
         )
         self._apply_context(self.context.process(obs), tick)
-        self._assess(tick.at, tick.offset_s)
+        self._assess(tick.at, tick.offset_s, safety=False)
 
     # ---- context, rules, persistence -------------------------------------------------------------
     def _apply_context(self, update: ContextUpdate, tick: Tick) -> None:
@@ -363,8 +362,12 @@ class PatrolEngine:
                 attributes=ev.attributes,
             )
 
-    def _assess(self, now: datetime, offset_s: float) -> None:
-        changes = self.reasoner.assess(self._events, self._entities, self._samples, now)
+    def _assess(
+        self, now: datetime, offset_s: float, *, camera: bool = True, safety: bool = True
+    ) -> None:
+        changes = self.reasoner.assess(
+            self._events, self._entities, self._samples, now, camera=camera, safety=safety
+        )
         for change in changes:
             self.store.save_alert(change.alert)
             self._announce(change, now, offset_s)

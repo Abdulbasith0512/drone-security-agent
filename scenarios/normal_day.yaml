@@ -81,3 +81,17 @@ frames:
     timestamp_offset: 960
     zone: driveway
     description: "Driveway clear, no vehicles or people"
+# Machine-readable ground truth: this is the control, so nothing may be raised.
+expect:
+  events:
+    - {object_type: vehicle, zone: main_gate, min_duration_s: 110, max_duration_s: 130, attributes: {color: white}, note: "the delivery van"}
+  alerts: []
+  forbidden:
+    - {rule_id: loitering}
+    - {rule_id: after_hours_presence}
+    - {rule_id: restricted_zone_entry}
+    - {rule_id: repeat_vehicle}
+    - {rule_id: low_battery}
+    - {rule_id: signal_loss}
+    - {rule_id: geofence_violation}
+    - {rule_id: altitude_anomaly}

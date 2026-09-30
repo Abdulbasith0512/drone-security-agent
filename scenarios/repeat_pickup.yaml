@@ -1,0 +1,55 @@
+# A similar blue pickup shows up three times in one afternoon (parking area, driveway, main gate),
+# with a red sedan passing through as a distractor. Daytime, so after-hours presence stays quiet.
+# Ground truth (written from this story before running the system):
+#   - the pickup appears at +60 s, +660 s ("dark blue" once) and +960 s, each for 60 s
+#   - the third appearance starts at +960 s: that is when the repeat-vehicle alert becomes true
+#   - the red sedan is a different vehicle: one event, not part of the pickup's entity
+# All coordinates are synthetic. Frames are 60 s apart.
+name: repeat_pickup
+description: A similar blue pickup returns three times across separate zones; a red sedan is the distractor.
+start: "2026-09-29T12:00:00+05:30"
+telemetry:
+  seed: 12
+  sample_interval_s: 10
+  stale_after_s: 30
+  battery_start_percent: 90
+  battery_drain_percent_per_min: 0.4
+  signal_baseline_percent: 94
+  patrol:
+    - {zone: parking_area, duration_s: 300}   # 12:00-12:05
+    - {zone: driveway, duration_s: 300}       # 12:05-12:10
+    - {zone: driveway, duration_s: 300}       # 12:10-12:15
+    - {zone: main_gate, duration_s: 300}      # 12:15-12:20
+frames:
+  - {frame_id: 1, timestamp_offset: 60, zone: parking_area, description: "Blue pickup truck parked in the parking area", objects: [{type: vehicle, activity: parked, attributes: {color: blue, body_type: pickup}, confidence: 0.93}]}
+  - {frame_id: 2, timestamp_offset: 120, zone: parking_area, description: "Blue pickup truck still parked", objects: [{type: vehicle, activity: parked, attributes: {color: blue, body_type: pickup}, confidence: 0.94}]}
+  - {frame_id: 3, timestamp_offset: 180, zone: parking_area, description: "Parking area empty"}
+  - {frame_id: 4, timestamp_offset: 360, zone: driveway, description: "Red sedan driving along the driveway", objects: [{type: vehicle, activity: driving, attributes: {color: red, body_type: sedan}, confidence: 0.9}]}
+  - {frame_id: 5, timestamp_offset: 420, zone: driveway, description: "Red sedan leaving the driveway", objects: [{type: vehicle, activity: driving, attributes: {color: red, body_type: sedan}, confidence: 0.9}]}
+  - {frame_id: 6, timestamp_offset: 480, zone: driveway, description: "Driveway empty"}
+  - {frame_id: 7, timestamp_offset: 660, zone: driveway, description: "Dark blue pickup truck on the driveway", objects: [{type: vehicle, activity: driving, attributes: {color: dark blue, body_type: pickup}, confidence: 0.88}]}
+  - {frame_id: 8, timestamp_offset: 720, zone: driveway, description: "Dark blue pickup truck stopping on the driveway", objects: [{type: vehicle, activity: stopped, attributes: {color: dark blue, body_type: pickup}, confidence: 0.89}]}
+  - {frame_id: 9, timestamp_offset: 780, zone: driveway, description: "Driveway empty"}
+  - {frame_id: 10, timestamp_offset: 960, zone: main_gate, description: "Blue pickup truck at the main gate", objects: [{type: vehicle, activity: stopped, attributes: {color: blue, body_type: pickup}, confidence: 0.92}]}
+  - {frame_id: 11, timestamp_offset: 1020, zone: main_gate, description: "Blue pickup truck waiting at the gate", objects: [{type: vehicle, activity: stopped, attributes: {color: blue, body_type: pickup}, confidence: 0.91}]}
+  - {frame_id: 12, timestamp_offset: 1080, zone: main_gate, description: "Main gate clear"}
+expect:
+  events:
+    - {object_type: vehicle, zone: parking_area, min_duration_s: 55, max_duration_s: 65, attributes: {color: blue}}
+    - {object_type: vehicle, zone: driveway, min_duration_s: 55, max_duration_s: 65, attributes: {color: red}}
+    - {object_type: vehicle, zone: driveway, min_duration_s: 55, max_duration_s: 65, attributes: {color: dark blue}}
+    - {object_type: vehicle, zone: main_gate, min_duration_s: 55, max_duration_s: 65, attributes: {color: blue}}
+  entities:
+    - {attributes: {color: blue, body_type: pickup}, appearances: 3, note: "'dark blue' still matches after normalisation"}
+    - {attributes: {color: red, body_type: sedan}, appearances: 1}
+  alerts:
+    - rule_id: repeat_vehicle
+      steps: [{severity: low, at_s: 960}]
+      detect_within_s: 60
+      final_status: open
+  forbidden:
+    - {rule_id: loitering}
+    - {rule_id: after_hours_presence}
+    - {rule_id: restricted_zone_entry}
+    - {rule_id: low_battery}
+    - {rule_id: signal_loss}

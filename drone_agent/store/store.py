@@ -75,6 +75,12 @@ class Store(DerivedMixin, RunsMixin):
             Path(target).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(target, isolation_level=None)  # explicit BEGIN/COMMIT below
         conn.row_factory = sqlite3.Row
+        if target != ":memory:":
+            # A live run commits every tick and the analyst reads while it writes: WAL keeps both
+            # fast and non-blocking, and NORMAL synchronous is safe against everything but power
+            # loss during a checkpoint (this data is regenerable from the scenario).
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
         store = cls(conn)
         try:
             store._initialize()

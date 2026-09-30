@@ -32,13 +32,22 @@ class SecurityReasoner:
         entities: Sequence[Entity],
         telemetry: Sequence[Telemetry],
         now: datetime,
+        *,
+        camera: bool = True,
+        safety: bool = True,
     ) -> list[AlertChange]:
-        """Evaluate every rule on the data so far and apply the result to the alert lifecycle.
+        """Evaluate the rules on the data so far and apply the result to the alert lifecycle.
 
-        Returns only what changed at this step (a new alert, an escalation, a resolution, or new
-        evidence), in chronological order. Calling it again with unchanged data returns [].
+        `camera` / `safety` choose which rule family to evaluate: a telemetry tick cannot change a
+        camera rule and a frame cannot change a safety rule, so a streaming run evaluates only the
+        family a tick could affect. Returns what changed at this step (a new alert, an
+        escalation, a resolution, or new evidence) in chronological order; unchanged data gives [].
         """
-        snapshots = self.engine.run(events, entities, telemetry, now=now)
+        snapshots: list[Alert] = []
+        if camera:
+            snapshots += self.engine.run_events(events, entities)
+        if safety:
+            snapshots += self.engine.run_safety(telemetry, now)
         return self.manager.reconcile(snapshots, now, live=True)
 
     @property

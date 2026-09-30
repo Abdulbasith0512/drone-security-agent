@@ -11,14 +11,17 @@ from pathlib import Path
 
 from drone_agent.eval import (
     gate_exp,
+    ground_truth,
     grounding_exp,
+    noise_exp,
     pipeline_exp,
     rules_exp,
+    sampler_exp,
     scale,
 )
 from drone_agent.eval.base import CONTROLLED_QUALIFICATION, ExperimentResult
 
-HARNESS_VERSION = "1"
+HARNESS_VERSION = "2"
 QUALIFICATIONS = (
     CONTROLLED_QUALIFICATION,
     "Scripted detections do not measure vision-model perception accuracy.",
@@ -130,6 +133,65 @@ def build_ablation_table(results: dict[str, ExperimentResult]) -> list[dict]:
             "escalation is lost",
         }
     )
+    sp = results["sampler"].measured["policies"]
+    adaptive = sp["adaptive (pixel + telemetry + event watch + refresh)"]
+    pixel = sp["pixel gate, threshold 6 (previous default)"]
+    periodic = sp["pixel gate + refresh every 15 frames"]
+    frames = results["sampler"].measured["frames_per_stream"]
+    window = results["sampler"].measured["detect_window_frames"]
+    rows.append(
+        {
+            "component": "Adaptive sampling",
+            "metric": f"meaningful changes detected within {window} frames (generated streams)",
+            "baseline_setting": "adaptive (pixel + telemetry + event watch + refresh)",
+            "baseline": adaptive["recall"],
+            "ablated_setting": "pixel gate only (previous default)",
+            "ablated": pixel["recall"],
+            "effect": f"{pixel['recall'] - adaptive['recall']:+.3f}",
+            "interpretation": f"the pixel gate misses {pixel['missed_small']} small and "
+            f"{pixel['missed_medium']} medium changes that the adaptive sampler mostly catches",
+        }
+    )
+    rows.append(
+        {
+            "component": "Adaptive sampling",
+            "metric": f"model calls per {frames}-frame stream",
+            "baseline_setting": "adaptive",
+            "baseline": adaptive["calls_mean"],
+            "ablated_setting": "pixel gate only (previous default)",
+            "ablated": pixel["calls_mean"],
+            "effect": f"{pixel['calls_mean'] - adaptive['calls_mean']:+.1f} calls",
+            "interpretation": "recall is bought with calls: never quote the saving without the "
+            "miss rate in the row above",
+        }
+    )
+    rows.append(
+        {
+            "component": "Adaptive sampling",
+            "metric": "model calls per detected change",
+            "baseline_setting": "adaptive",
+            "baseline": adaptive["calls_per_detected"],
+            "ablated_setting": "pixel gate + refresh every 15 frames",
+            "ablated": periodic["calls_per_detected"],
+            "effect": f"{periodic['calls_per_detected'] - adaptive['calls_per_detected']:+.2f}",
+            "interpretation": "against the fair cheap baseline (a fixed refresh), not a straw man",
+        }
+    )
+    gt = results["ground_truth"].measured["aggregate"]
+    rows.append(
+        {
+            "component": "Streaming alerts with ground truth",
+            "metric": "alert F1 (perfect scripted perception)",
+            "baseline_setting": f"{gt['scenarios']} scenarios, {gt['tp'] + gt['fn']} expected alerts",
+            "baseline": gt["f1"],
+            "ablated_setting": "n/a",
+            "ablated": "n/a",
+            "effect": f"latency median {gt['detection_latency_s']['median']} s, "
+            f"max {gt['detection_latency_s']['max']} s",
+            "interpretation": "1.0 by construction (author-written labels, perfect input); the "
+            "noise sweep shows how it degrades",
+        }
+    )
     em = results["entity_memory"].measured
     for metric, field in (
         ("repeat-vehicle alerts (security_events)", "repeat_vehicle_alerts"),
@@ -189,6 +251,8 @@ def run_all(
     scale_enabled: bool = False,
     scale_sizes: tuple[int, ...] = scale.DEFAULT_SIZES,
     repeats: int = 5,
+    noise_enabled: bool = False,
+    noise_seeds: int = noise_exp.DEFAULT_SEEDS,
 ) -> dict:
     experiments: list[ExperimentResult] = [
         gate_exp.run(),
@@ -198,7 +262,11 @@ def run_all(
         rules_exp.run(),
         grounding_exp.run_adversarial(),
         grounding_exp.run_semantic_probe(),
+        ground_truth.run(),
+        sampler_exp.run(),
     ]
+    if noise_enabled:
+        experiments.append(noise_exp.run(seeds=noise_seeds))
     by_key = {e.key: e for e in experiments}
     if scale_enabled:
         experiments.append(scale.run(scale_sizes, repeats=repeats))
@@ -207,6 +275,7 @@ def run_all(
             "harness_version": HARNESS_VERSION,
             "generated_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
             "scale_included": scale_enabled,
+            "noise_included": noise_enabled,
             "qualifications": list(QUALIFICATIONS),
         },
         "experiments": {e.key: e.to_dict() for e in experiments},

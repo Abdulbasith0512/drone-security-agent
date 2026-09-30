@@ -1,0 +1,55 @@
+# A person lingers at the main gate across midnight (23:56 -> 00:03).
+# The ground truth below was written from this story BEFORE the system was run against it:
+#   - the person is first seen at +60 s and last seen at +480 s (one 420 s event, frame 9 is empty)
+#   - loitering WARNS after 120 s (+180 s = 23:58:00) and the same alert turns CRITICAL after
+#     300 s (+360 s = 00:01:00); the drone then moves on, so the alert resolves
+#   - after-hours presence (closed 22:00-06:00) fires at the first sighting and stays open until an
+#     operator deals with it; nothing else may fire
+# All coordinates are synthetic. Frames are 60 s apart.
+name: loiter_midnight
+description: A person lingers at the main gate across midnight; the alert warns at 2 minutes and escalates to critical at 5.
+start: "2026-09-29T23:55:00+05:30"
+telemetry:
+  seed: 11
+  sample_interval_s: 10
+  stale_after_s: 30
+  battery_start_percent: 92
+  battery_drain_percent_per_min: 0.4
+  signal_baseline_percent: 93
+  patrol:
+    - {zone: main_gate, duration_s: 600}   # 23:55-00:05
+    - {zone: driveway, duration_s: 300}    # 00:05-00:10
+frames:
+  - {frame_id: 1, timestamp_offset: 60, zone: main_gate, description: "Person standing at the main gate", objects: [{type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.94}]}
+  - {frame_id: 2, timestamp_offset: 120, zone: main_gate, description: "Person in dark jacket still at the main gate", objects: [{type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.93}]}
+  - {frame_id: 3, timestamp_offset: 180, zone: main_gate, description: "Person in dark jacket pacing near the gate", objects: [{type: person, activity: pacing, attributes: {clothing: dark jacket}, confidence: 0.92}]}
+  - {frame_id: 4, timestamp_offset: 240, zone: main_gate, description: "Person in dark jacket looking through the gate", objects: [{type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.93}]}
+  - {frame_id: 5, timestamp_offset: 300, zone: main_gate, description: "Person in dark jacket at the gate after midnight", objects: [{type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.94}]}
+  - {frame_id: 6, timestamp_offset: 360, zone: main_gate, description: "Person in dark jacket pacing at the gate", objects: [{type: person, activity: pacing, attributes: {clothing: dark jacket}, confidence: 0.91}]}
+  - {frame_id: 7, timestamp_offset: 420, zone: main_gate, description: "Person in dark jacket standing at the gate", objects: [{type: person, activity: standing, attributes: {clothing: dark jacket}, confidence: 0.93}]}
+  - {frame_id: 8, timestamp_offset: 480, zone: main_gate, description: "Person in dark jacket walking away from the gate", objects: [{type: person, activity: walking, attributes: {clothing: dark jacket}, confidence: 0.9}]}
+  - {frame_id: 9, timestamp_offset: 540, zone: main_gate, description: "Main gate area, nobody visible"}
+  - {frame_id: 10, timestamp_offset: 660, zone: driveway, description: "Driveway clear"}
+  - {frame_id: 11, timestamp_offset: 780, zone: driveway, description: "Driveway clear"}
+expect:
+  events:
+    - {object_type: person, zone: main_gate, min_duration_s: 410, max_duration_s: 430, note: "one continuous 420 s visit"}
+  alerts:
+    - rule_id: loitering
+      zone: main_gate
+      steps: [{severity: medium, at_s: 180}, {severity: critical, at_s: 360}]
+      detect_within_s: 60
+      final_status: resolved
+      note: "warns at 120 s of loitering, escalates at 300 s, resolves when the drone leaves the gate"
+    - rule_id: after_hours_presence
+      zone: main_gate
+      steps: [{severity: medium, at_s: 60}]
+      detect_within_s: 60
+      final_status: open
+  forbidden:
+    - {rule_id: restricted_zone_entry}
+    - {rule_id: repeat_vehicle}
+    - {rule_id: low_battery}
+    - {rule_id: signal_loss}
+    - {rule_id: geofence_violation}
+    - {rule_id: altitude_anomaly}

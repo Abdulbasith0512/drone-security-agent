@@ -1,0 +1,42 @@
+# A quiet patrol whose battery falls faster than planned (a scripted telemetry anomaly): it drops to
+# 19% at +300 s and to 8% at +480 s. There is no camera activity at all: this alert comes from the
+# drone's own telemetry, which is the point (a safety alert with no security event behind it).
+# Ground truth (written before running the system): low-battery WARNING at +300 s (first sample at
+# or below 20%), CRITICAL at +480 s (first sample at or below 10%), still open at the end because the
+# battery never recovers. No other alert.
+# All coordinates are synthetic.
+name: low_battery
+description: The battery falls to 19% and then 8% during an otherwise quiet daytime patrol.
+start: "2026-09-29T15:00:00+05:30"
+telemetry:
+  seed: 15
+  sample_interval_s: 10
+  stale_after_s: 30
+  battery_start_percent: 60
+  battery_drain_percent_per_min: 0.4
+  signal_baseline_percent: 93
+  patrol:
+    - {zone: main_gate, duration_s: 600}   # 15:00-15:10
+  anomalies:
+    - {kind: battery_drop, start_offset_s: 300, value: 19}
+    - {kind: battery_drop, start_offset_s: 480, value: 8}
+frames:
+  - {frame_id: 1, timestamp_offset: 60, zone: main_gate, description: "Main gate area, nothing visible"}
+  - {frame_id: 2, timestamp_offset: 180, zone: main_gate, description: "Main gate area, nothing visible"}
+  - {frame_id: 3, timestamp_offset: 300, zone: main_gate, description: "Main gate area, nothing visible"}
+  - {frame_id: 4, timestamp_offset: 420, zone: main_gate, description: "Main gate area, nothing visible"}
+  - {frame_id: 5, timestamp_offset: 540, zone: main_gate, description: "Main gate area, nothing visible"}
+expect:
+  alerts:
+    - rule_id: low_battery
+      zone: main_gate
+      steps: [{severity: medium, at_s: 300}, {severity: critical, at_s: 480}]
+      detect_within_s: 20
+      final_status: escalated
+      note: "a warning, then the same alert escalates to critical; nothing recovers it, so it stays escalated"
+  forbidden:
+    - {rule_id: loitering}
+    - {rule_id: after_hours_presence}
+    - {rule_id: restricted_zone_entry}
+    - {rule_id: signal_loss}
+    - {rule_id: geofence_violation}

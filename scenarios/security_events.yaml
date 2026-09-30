@@ -189,3 +189,60 @@ frames:
     timestamp_offset: 2760
     zone: driveway
     description: "Driveway clear"
+# Machine-readable ground truth (what the header above says, as data; used by `evaluate`).
+# Times are seconds after the scenario start (23:40:00). Written from the story before the system
+# was scored against it.
+expect:
+  events:
+    - {object_type: person, zone: main_gate, min_duration_s: 470, max_duration_s: 490, note: "person A: one event despite the missed detection in frame 5"}
+    - {object_type: person, zone: warehouse, min_duration_s: 55, max_duration_s: 65, note: "person B, brief"}
+    - {object_type: person, zone: restricted_zone, min_duration_s: 115, max_duration_s: 125, note: "person B in the restricted zone"}
+    - {object_type: vehicle, zone: parking_area, min_duration_s: 55, max_duration_s: 65, attributes: {color: blue}}
+    - {object_type: vehicle, zone: driveway, min_duration_s: 55, max_duration_s: 65, attributes: {color: dark blue}}
+    - {object_type: vehicle, zone: main_gate, min_duration_s: 55, max_duration_s: 65, attributes: {color: blue}}
+    - {object_type: vehicle, zone: parking_area, min_duration_s: 0, max_duration_s: 5, attributes: {color: white}, note: "the distractor sedan, seen once"}
+  entities:
+    - {attributes: {color: blue, body_type: pickup}, appearances: 3}
+    - {attributes: {color: white, body_type: sedan}, appearances: 1}
+  alerts:
+    - rule_id: loitering
+      zone: main_gate
+      steps: [{severity: medium, at_s: 180}, {severity: critical, at_s: 360}]
+      detect_within_s: 60
+      final_status: resolved
+    - rule_id: after_hours_presence
+      zone: main_gate
+      steps: [{severity: medium, at_s: 60}]
+      detect_within_s: 60
+      final_status: open
+    - rule_id: repeat_vehicle
+      zone: main_gate
+      steps: [{severity: low, at_s: 1500}]
+      detect_within_s: 60
+      final_status: open
+      note: "third appearance of the similar blue pickup starts at frame 16"
+    - rule_id: signal_loss
+      zone: main_gate
+      steps: [{severity: high, at_s: 1590}]
+      detect_within_s: 20
+      final_status: resolved
+      note: "telemetry silent from +1570 s to +1690 s; the last good sample is +1560 s"
+    - rule_id: after_hours_presence
+      zone: warehouse
+      steps: [{severity: medium, at_s: 1860}]
+      detect_within_s: 60
+      final_status: open
+    - rule_id: after_hours_presence
+      zone: restricted_zone
+      steps: [{severity: medium, at_s: 2160}]
+      detect_within_s: 60
+      final_status: open
+    - rule_id: restricted_zone_entry
+      zone: restricted_zone
+      steps: [{severity: high, at_s: 2160}]
+      detect_within_s: 60
+      final_status: open
+  forbidden:
+    - {rule_id: low_battery}
+    - {rule_id: geofence_violation}
+    - {rule_id: altitude_anomaly}

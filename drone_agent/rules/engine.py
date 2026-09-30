@@ -53,18 +53,37 @@ class RuleEngine:
         `events` may include OPEN events (a live snapshot). `now` is the end of the data; it lets
         the signal rule report a telemetry outage that is still going on.
         """
+        return self._ordered([*self.run_events(events, entities), *self.run_safety(telemetry, now)])
+
+    def run_events(self, events: Sequence[Event], entities: Sequence[Entity]) -> list[Alert]:
+        """Only the camera rules (they depend on events and entities, never on telemetry)."""
         cfg = self.config
-        produced = [
-            *loitering.evaluate(events, cfg.loitering),
-            *after_hours.evaluate(events, cfg.after_hours_presence),
-            *repeat_vehicle.evaluate(events, entities, cfg.repeat_vehicle),
-            *restricted_zone.evaluate(events, cfg.restricted_zone_entry),
-            *safety.low_battery(telemetry, cfg.low_battery),
-            *safety.signal_loss(telemetry, cfg.signal_loss, now),
-            *safety.altitude_anomaly(telemetry, cfg.altitude_anomaly),
-            *safety.geofence_violation(telemetry, cfg.geofence_violation),
-        ]
-        unique = {a.alert_id: a for a in produced}  # identical (rule, subject) collapses to one
+        return self._ordered(
+            [
+                *loitering.evaluate(events, cfg.loitering),
+                *after_hours.evaluate(events, cfg.after_hours_presence),
+                *repeat_vehicle.evaluate(events, entities, cfg.repeat_vehicle),
+                *restricted_zone.evaluate(events, cfg.restricted_zone_entry),
+            ]
+        )
+
+    def run_safety(
+        self, telemetry: Sequence[Telemetry], now: datetime | None = None
+    ) -> list[Alert]:
+        """Only the drone-safety rules (they depend on telemetry and the clock, never on events)."""
+        cfg = self.config
+        return self._ordered(
+            [
+                *safety.low_battery(telemetry, cfg.low_battery),
+                *safety.signal_loss(telemetry, cfg.signal_loss, now),
+                *safety.altitude_anomaly(telemetry, cfg.altitude_anomaly),
+                *safety.geofence_violation(telemetry, cfg.geofence_violation),
+            ]
+        )
+
+    @staticmethod
+    def _ordered(alerts: list[Alert]) -> list[Alert]:
+        unique = {a.alert_id: a for a in alerts}  # identical (rule, subject) collapses to one
         return sorted(
             unique.values(),
             key=lambda a: (a.triggered_at, _RULE_ORDER[a.rule_id], a.alert_id),

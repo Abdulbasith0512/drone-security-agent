@@ -1,0 +1,50 @@
+# Night: a person in a dark hoodie walks up to the main gate and then goes on to the garage.
+# Ground truth (written before running the system), closed hours are 22:00-06:00:
+#   - the person is at the gate from +60 s to +120 s (60 s: not loitering) and in the garage from
+#     +360 s to +480 s (120 s)
+#   - after-hours presence is true in BOTH places: at +60 s (gate) and again at +360 s (garage)
+#   - the garage is not a restricted zone in the default rules and loitering only watches the gate,
+#     so nothing else may fire
+# All coordinates are synthetic. Frames are 60 s apart.
+name: intruder_garage
+description: A person walks from the main gate to the garage at 01:20; after-hours presence follows them.
+start: "2026-09-30T01:20:00+05:30"
+telemetry:
+  seed: 14
+  sample_interval_s: 10
+  stale_after_s: 30
+  battery_start_percent: 85
+  battery_drain_percent_per_min: 0.4
+  signal_baseline_percent: 92
+  patrol:
+    - {zone: main_gate, duration_s: 300}   # 01:20-01:25
+    - {zone: garage, duration_s: 300}      # 01:25-01:30
+frames:
+  - {frame_id: 1, timestamp_offset: 60, zone: main_gate, description: "Person in a dark hoodie walking up to the main gate", objects: [{type: person, activity: walking, attributes: {clothing: dark hoodie}, confidence: 0.91}]}
+  - {frame_id: 2, timestamp_offset: 120, zone: main_gate, description: "Person in a dark hoodie at the gate, looking around", objects: [{type: person, activity: standing, attributes: {clothing: dark hoodie}, confidence: 0.9}]}
+  - {frame_id: 3, timestamp_offset: 180, zone: main_gate, description: "Main gate area, nobody visible"}
+  - {frame_id: 4, timestamp_offset: 360, zone: garage, description: "Person in a dark hoodie at the garage door", objects: [{type: person, activity: standing, attributes: {clothing: dark hoodie}, confidence: 0.88}]}
+  - {frame_id: 5, timestamp_offset: 420, zone: garage, description: "Person in a dark hoodie inside the garage", objects: [{type: person, activity: walking, attributes: {clothing: dark hoodie}, confidence: 0.87}]}
+  - {frame_id: 6, timestamp_offset: 480, zone: garage, description: "Person in a dark hoodie inside the garage", objects: [{type: person, activity: crouching, attributes: {clothing: dark hoodie}, confidence: 0.86}]}
+  - {frame_id: 7, timestamp_offset: 540, zone: garage, description: "Garage clear"}
+expect:
+  events:
+    - {object_type: person, zone: main_gate, min_duration_s: 55, max_duration_s: 65}
+    - {object_type: person, zone: garage, min_duration_s: 115, max_duration_s: 125}
+  alerts:
+    - rule_id: after_hours_presence
+      zone: main_gate
+      steps: [{severity: medium, at_s: 60}]
+      detect_within_s: 60
+      final_status: open
+    - rule_id: after_hours_presence
+      zone: garage
+      steps: [{severity: medium, at_s: 360}]
+      detect_within_s: 60
+      final_status: open
+  forbidden:
+    - {rule_id: loitering}
+    - {rule_id: restricted_zone_entry}
+    - {rule_id: repeat_vehicle}
+    - {rule_id: low_battery}
+    - {rule_id: signal_loss}

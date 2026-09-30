@@ -1,0 +1,62 @@
+# The drone's link goes bad three different ways during a quiet patrol:
+#   1. a slow fade to 30% (degraded) between +120 s and +280 s;
+#   2. a deep fade to 5% between +340 s and +440 s: degraded first, then LOST;
+#   3. telemetry stops arriving entirely for 140 s (+500 s to +620 s): a delivery gap.
+# Ground truth (written before running the system), from the anomaly parameters and a 10 s sample
+# interval, baseline 92%, "degraded" below 40%, "lost" below 15% or after 30 s of silence:
+#   1. first sample below 40% is +160 s (the fade reaches 30% after its 40 s ramp); the next
+#      healthy sample is +290 s              -> MEDIUM at +160 s, resolved
+#   2. below 40% at +360 s (34%), below 15% at +370 s (5%); healthy again at +450 s
+#                                            -> MEDIUM at +360 s, escalates to HIGH at +370 s, resolved
+#   3. last sample +490 s, silent for more than 30 s from +520 s; data resumes at +630 s
+#                                            -> HIGH at +520 s, resolved
+# No camera activity; nothing else may fire. All coordinates are synthetic.
+name: signal_loss
+description: The link degrades, fails and drops out in three separate episodes (fade, deep fade, dropout).
+start: "2026-09-29T16:00:00+05:30"
+telemetry:
+  seed: 18
+  sample_interval_s: 10
+  stale_after_s: 30
+  battery_start_percent: 88
+  battery_drain_percent_per_min: 0.3
+  signal_baseline_percent: 92
+  patrol:
+    - {zone: main_gate, duration_s: 700}   # 16:00-16:11:40
+  anomalies:
+    - {kind: signal_fade, start_offset_s: 120, end_offset_s: 280, value: 30, ramp_s: 40}
+    - {kind: signal_fade, start_offset_s: 340, end_offset_s: 440, value: 5, ramp_s: 30}
+  dropouts:
+    - {start_offset_s: 500, end_offset_s: 620}
+frames:
+  - {frame_id: 1, timestamp_offset: 60, zone: main_gate, description: "Main gate area, nothing visible"}
+  - {frame_id: 2, timestamp_offset: 200, zone: main_gate, description: "Main gate area, nothing visible"}
+  - {frame_id: 3, timestamp_offset: 400, zone: main_gate, description: "Main gate area, nothing visible"}
+  - {frame_id: 4, timestamp_offset: 560, zone: main_gate, description: "Main gate area, nothing visible"}
+  - {frame_id: 5, timestamp_offset: 680, zone: main_gate, description: "Main gate area, nothing visible"}
+expect:
+  alerts:
+    - rule_id: signal_loss
+      zone: main_gate
+      steps: [{severity: medium, at_s: 160}]
+      detect_within_s: 20
+      final_status: resolved
+      note: "slow fade: degraded only"
+    - rule_id: signal_loss
+      zone: main_gate
+      steps: [{severity: medium, at_s: 360}, {severity: high, at_s: 370}]
+      detect_within_s: 20
+      final_status: resolved
+      note: "deep fade: degraded, then the same alert escalates to lost"
+    - rule_id: signal_loss
+      zone: main_gate
+      steps: [{severity: high, at_s: 520}]
+      detect_within_s: 20
+      final_status: resolved
+      note: "delivery gap: no telemetry for more than 30 s"
+  forbidden:
+    - {rule_id: loitering}
+    - {rule_id: after_hours_presence}
+    - {rule_id: restricted_zone_entry}
+    - {rule_id: low_battery}
+    - {rule_id: geofence_violation}

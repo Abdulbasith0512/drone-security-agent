@@ -26,6 +26,9 @@ class ExpectedEvent(DomainModel):
     zone: Zone
     min_duration_s: float = Field(default=0.0, ge=0)
     max_duration_s: float | None = Field(default=None, ge=0)
+    # Attribute values (case-insensitive) the event must carry, e.g. {"color": "red"}; used to tell
+    # apart two events of the same type in the same zone.
+    attributes: dict[str, str] = Field(default_factory=dict)
     note: str = ""
 
     @model_validator(mode="after")
@@ -76,8 +79,18 @@ class ForbiddenAlert(DomainModel):
     note: str = ""
 
 
+class ExpectedEntity(DomainModel):
+    """A "similar vehicle" the memory must have formed: its coarse signature and how many
+    separate appearances it must link."""
+
+    attributes: dict[str, str]  # normalised coarse attributes, e.g. {"color": "blue", ...}
+    appearances: int = Field(ge=1)
+    note: str = ""
+
+
 class Expectations(DomainModel):
     events: list[ExpectedEvent] = Field(default_factory=list)
+    entities: list[ExpectedEntity] = Field(default_factory=list)
     alerts: list[ExpectedAlert] = Field(default_factory=list)
     forbidden: list[ForbiddenAlert] = Field(default_factory=list)
     # A rung reached within this many seconds of its expected time counts as timely.

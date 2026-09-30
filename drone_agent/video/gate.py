@@ -43,6 +43,19 @@ class FrameGate:
         """Forget the reference, so the next frame is accepted as 'first' (e.g. a new scene)."""
         self._reference = None
 
+    def score(self, image: np.ndarray) -> float | None:
+        """Difference from the reference without changing it (None: no reference yet).
+
+        Lets another decision-maker (the adaptive sampler) use the pixel signal and decide for
+        itself; it then calls `set_reference` for the frames it actually sends to the model.
+        """
+        if self._reference is None:
+            return None
+        return round(float(np.abs(self._small(image) - self._reference).mean()), 4)
+
+    def set_reference(self, image: np.ndarray) -> None:
+        self._reference = self._small(image)
+
     def check(self, image: np.ndarray) -> GateDecision:
         """Decide for one frame; an accepted frame becomes the new reference."""
         if not self.config.enabled:

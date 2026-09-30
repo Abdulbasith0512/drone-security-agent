@@ -48,7 +48,7 @@ def test_the_functional_results_are_identical_between_runs(two_runs):
 def test_every_experiment_separates_measured_interpretation_and_limitations(results):
     assert set(results) == {
         "gate", "compression", "flicker", "entity_memory", "rules", "citation_adversarial",
-        "semantic_probe",
+        "semantic_probe", "ground_truth", "sampler",
     }  # fmt: skip
     for exp in results.values():
         assert exp["measured"] and exp["interpretation"] and exp["limitations"]

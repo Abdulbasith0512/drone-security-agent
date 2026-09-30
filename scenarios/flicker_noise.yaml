@@ -1,0 +1,46 @@
+# A person stands at the gate for 7 minutes, but the detector MISSES them on two consecutive frames
+# (+240 s and +300 s): frame noise. The system tolerates up to two missed frames, so this must stay
+# ONE event and ONE loitering alert that escalates, not two events or two alerts.
+# Ground truth (written before running the system), daytime so after-hours stays quiet:
+#   - one person event from +60 s to +480 s (420 s)
+#   - loitering WARNS at +180 s (60 + 120) and the same alert turns CRITICAL at +360 s (60 + 300)
+#   - the input ends with the person still there, so the alert is still active at the end
+# All coordinates are synthetic. Frames are 60 s apart.
+name: flicker_noise
+description: Two consecutive missed detections in a 7-minute gate visit must not split it into pieces.
+start: "2026-09-29T12:00:00+05:30"
+telemetry:
+  seed: 16
+  sample_interval_s: 10
+  stale_after_s: 30
+  battery_start_percent: 90
+  battery_drain_percent_per_min: 0.4
+  signal_baseline_percent: 94
+  patrol:
+    - {zone: main_gate, duration_s: 600}   # 12:00-12:10
+frames:
+  - {frame_id: 1, timestamp_offset: 60, zone: main_gate, description: "Person at the main gate", objects: [{type: person, activity: standing, attributes: {clothing: grey coat}, confidence: 0.93}]}
+  - {frame_id: 2, timestamp_offset: 120, zone: main_gate, description: "Person in a grey coat at the gate", objects: [{type: person, activity: standing, attributes: {clothing: grey coat}, confidence: 0.92}]}
+  - {frame_id: 3, timestamp_offset: 180, zone: main_gate, description: "Person in a grey coat at the gate", objects: [{type: person, activity: standing, attributes: {clothing: grey coat}, confidence: 0.94}]}
+  - {frame_id: 4, timestamp_offset: 240, zone: main_gate, description: "Main gate area, no detection (missed)"}
+  - {frame_id: 5, timestamp_offset: 300, zone: main_gate, description: "Main gate area, no detection (missed)"}
+  - {frame_id: 6, timestamp_offset: 360, zone: main_gate, description: "Person in a grey coat at the gate", objects: [{type: person, activity: standing, attributes: {clothing: grey coat}, confidence: 0.91}]}
+  - {frame_id: 7, timestamp_offset: 420, zone: main_gate, description: "Person in a grey coat at the gate", objects: [{type: person, activity: pacing, attributes: {clothing: grey coat}, confidence: 0.92}]}
+  - {frame_id: 8, timestamp_offset: 480, zone: main_gate, description: "Person in a grey coat at the gate", objects: [{type: person, activity: standing, attributes: {clothing: grey coat}, confidence: 0.93}]}
+  - {frame_id: 9, timestamp_offset: 540, zone: main_gate, description: "Main gate area, nobody visible"}
+expect:
+  events:
+    - {object_type: person, zone: main_gate, min_duration_s: 410, max_duration_s: 430, note: "one event despite two missed frames"}
+  alerts:
+    - rule_id: loitering
+      zone: main_gate
+      steps: [{severity: medium, at_s: 180}, {severity: critical, at_s: 360}]
+      detect_within_s: 60
+      final_status: escalated
+      note: "exactly one alert that escalates; a split would give two warnings and no critical"
+  forbidden:
+    - {rule_id: after_hours_presence}
+    - {rule_id: restricted_zone_entry}
+    - {rule_id: repeat_vehicle}
+    - {rule_id: low_battery}
+    - {rule_id: signal_loss}

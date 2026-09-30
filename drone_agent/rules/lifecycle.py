@@ -50,6 +50,8 @@ def _evolve(alert: Alert, **changes: object) -> Alert:
 class AlertManager:
     def __init__(self, alerts: Iterable[Alert] = ()) -> None:
         self._alerts: dict[str, Alert] = {a.alert_id: a for a in alerts}
+        # The last snapshot each alert was reconciled with: an identical snapshot changes nothing.
+        self._last_snapshot: dict[str, Alert] = {}
 
     # ---- reads -----------------------------------------------------------------------------
     @property
@@ -68,6 +70,9 @@ class AlertManager:
         changes: list[AlertChange] = []
         for snap in sorted(snapshots, key=lambda a: (a.triggered_at, a.alert_id)):
             existing = self._alerts.get(snap.alert_id)
+            if existing is not None and self._last_snapshot.get(snap.alert_id) == snap:
+                continue  # the rules see exactly what they saw last time: nothing to record
+            self._last_snapshot[snap.alert_id] = snap
             change = (
                 self._create(snap, now, live)
                 if existing is None

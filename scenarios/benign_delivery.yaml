@@ -1,0 +1,45 @@
+# A routine afternoon: a courier delivers a parcel at the gate (90 s on site) and a staff member
+# walks the driveway. NOTHING here should raise an alert; this is the false-positive control.
+# Ground truth (written before running the system): no alerts of any kind, and in particular no
+# loitering (the courier stays 30 s as a person, the van 120 s but rules cover people only), no
+# after-hours (14:00), no repeat vehicle (one van, seen once).
+# All coordinates are synthetic.
+name: benign_delivery
+description: A courier delivery and a staff walk-through in the afternoon; the control that must stay silent.
+start: "2026-09-29T14:00:00+05:30"
+telemetry:
+  seed: 13
+  sample_interval_s: 10
+  stale_after_s: 30
+  battery_start_percent: 88
+  battery_drain_percent_per_min: 0.4
+  signal_baseline_percent: 95
+  patrol:
+    - {zone: main_gate, duration_s: 300}   # 14:00-14:05
+    - {zone: driveway, duration_s: 300}    # 14:05-14:10
+frames:
+  - {frame_id: 1, timestamp_offset: 60, zone: main_gate, description: "White delivery van stopped outside the main gate", objects: [{type: vehicle, activity: stopped, attributes: {color: white, body_type: van}, confidence: 0.96}]}
+  - {frame_id: 2, timestamp_offset: 120, zone: main_gate, description: "Courier in hi-vis vest beside the van at the gate", objects: [{type: vehicle, activity: stopped, attributes: {color: white, body_type: van}, confidence: 0.95}, {type: person, activity: standing, attributes: {clothing: hi-vis vest}, confidence: 0.92}]}
+  - {frame_id: 3, timestamp_offset: 150, zone: main_gate, description: "Courier walking back to the van", objects: [{type: vehicle, activity: stopped, attributes: {color: white, body_type: van}, confidence: 0.94}, {type: person, activity: walking, attributes: {clothing: hi-vis vest}, confidence: 0.9}]}
+  - {frame_id: 4, timestamp_offset: 180, zone: main_gate, description: "White delivery van driving away from the gate", objects: [{type: vehicle, activity: driving, attributes: {color: white, body_type: van}, confidence: 0.93}]}
+  - {frame_id: 5, timestamp_offset: 240, zone: main_gate, description: "Main gate clear"}
+  - {frame_id: 6, timestamp_offset: 360, zone: driveway, description: "Staff member in a blue polo walking along the driveway", objects: [{type: person, activity: walking, attributes: {clothing: blue polo}, confidence: 0.91}]}
+  - {frame_id: 7, timestamp_offset: 420, zone: driveway, description: "Staff member in a blue polo walking toward the warehouse", objects: [{type: person, activity: walking, attributes: {clothing: blue polo}, confidence: 0.9}]}
+  - {frame_id: 8, timestamp_offset: 480, zone: driveway, description: "Driveway clear"}
+expect:
+  events:
+    - {object_type: vehicle, zone: main_gate, min_duration_s: 110, max_duration_s: 130, attributes: {color: white}}
+    - {object_type: person, zone: main_gate, min_duration_s: 25, max_duration_s: 35}
+    - {object_type: person, zone: driveway, min_duration_s: 55, max_duration_s: 65}
+  entities:
+    - {attributes: {color: white, body_type: van}, appearances: 1}
+  alerts: []
+  forbidden:
+    - {rule_id: loitering}
+    - {rule_id: after_hours_presence}
+    - {rule_id: restricted_zone_entry}
+    - {rule_id: repeat_vehicle}
+    - {rule_id: low_battery}
+    - {rule_id: signal_loss}
+    - {rule_id: geofence_violation}
+    - {rule_id: altitude_anomaly}

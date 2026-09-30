@@ -208,15 +208,14 @@ class AnalystTools:
             for e in self.store.event_ids_for_observation(obs.observation_id)
         ]
         events = [e for e in events if e]
-        ids = {e.event_id for e in events}
-        alerts = [a for a in self.store.query_alerts() if ids & set(a.event_ids)]
+        alerts = self.store.alerts_for_events(
+            [e.event_id for e in events], limit=self.limits.max_alerts
+        )
         return self._ok(
             {
                 "observation": self._obs_view(obs),
                 "events": [event_view(e, self.limits) for e in events],
-                "alerts": [
-                    self._alert_view(a, detail=False) for a in alerts[: self.limits.max_alerts]
-                ],
+                "alerts": [self._alert_view(a, detail=False) for a in alerts],
                 "note": "frames are text descriptions here; no image is stored",
             }
         )
@@ -236,25 +235,26 @@ class AnalystTools:
         try:
             if status not in (None, "") and str(status).lower() not in ("open", "closed"):
                 raise ValueError("status must be one of: open, closed")
-            events = self.store.query_events(
-                zone=_enum(Zone, zone, "zone"),
-                object_type=_enum(ObjectType, object_type, "object_type"),
-                entity_id=entity_id or None,
-                start=_time(start, "start"),
-                end=_time(end, "end"),
-                open_only=str(status).lower() == "open" if status else False,
-            )
-            if status and str(status).lower() == "closed":
-                events = [e for e in events if not e.is_open]
+            filters = {
+                "zone": _enum(Zone, zone, "zone"),
+                "object_type": _enum(ObjectType, object_type, "object_type"),
+                "entity_id": entity_id or None,
+                "start": _time(start, "start"),
+                "end": _time(end, "end"),
+                "open_only": str(status).lower() == "open" if status else False,
+                "closed_only": str(status).lower() == "closed" if status else False,
+            }
+            cap = self._cap(limit, self.limits.max_events, self.limits.max_events)
+            total = self.store.count_events_matching(**filters)
+            events = self.store.query_events(**filters, limit=cap)
         except ValueError as exc:
             return self._bad(exc)
-        cap = self._cap(limit, self.limits.max_events, self.limits.max_events)
         return self._ok(
             {
-                "total": len(events),
-                "returned": min(len(events), cap),
-                "truncated": len(events) > cap,
-                "events": [event_view(e, self.limits) for e in events[:cap]],
+                "total": total,
+                "returned": len(events),
+                "truncated": total > len(events),
+                "events": [event_view(e, self.limits) for e in events],
             }
         )
 
@@ -333,14 +333,15 @@ class AnalystTools:
 
     # -- entities ---------------------------------------------------------------------------
     def list_entities(self) -> dict:
-        entities = self.store.list_entities()
         cap = self.limits.max_entities
+        entities = self.store.list_entities(limit=cap)
+        total = self.store.count_entities()
         return self._ok(
             {
-                "total": len(entities),
-                "returned": min(len(entities), cap),
-                "truncated": len(entities) > cap,
-                "entities": [entity_view(e) for e in entities[:cap]],
+                "total": total,
+                "returned": len(entities),
+                "truncated": total > len(entities),
+                "entities": [entity_view(e) for e in entities],
             }
         )
 
@@ -357,7 +358,7 @@ class AnalystTools:
             return {"error": f"no entity with id '{clip(str(entity_id), 60)}'"}
         cap = self.limits.max_events
         appearances = [self.store.get_event(e) for e in ent.event_ids[:cap]]
-        alerts = [a for a in self.store.query_alerts() if a.entity_id == ent.entity_id]
+        alerts = self.store.query_alerts(entity_id=ent.entity_id, limit=self.limits.max_alerts)
         return self._ok(
             {
                 "entity": entity_view(ent),
@@ -365,9 +366,7 @@ class AnalystTools:
                 "is 'confirmed'",
                 "appearances_total": len(ent.event_ids),
                 "appearances": [event_view(e, self.limits) for e in appearances if e],
-                "alerts": [
-                    self._alert_view(a, detail=False) for a in alerts[: self.limits.max_alerts]
-                ],
+                "alerts": [self._alert_view(a, detail=False) for a in alerts],
             }
         )
 
@@ -385,7 +384,10 @@ class AnalystTools:
             if event.entity_id:
                 return self.get_entity_history(event.entity_id)
             return {"error": f"event {event.event_id} is not linked to a vehicle entity"}
-        hints = similar_earlier_person_events(event, self.store.query_events())
+        candidates = self.store.query_events(
+            object_type=ObjectType.PERSON, zone=event.zone, end=event.first_seen
+        )
+        hints = similar_earlier_person_events(event, candidates)
         cap = self.limits.max_events
         return self._ok(
             {
@@ -417,21 +419,23 @@ class AnalystTools:
         limit: int | None = None,
     ) -> dict:
         try:
-            alerts = self.store.query_alerts(
-                rule_id=rule_id or None,
-                severity=_enum(Severity, severity, "severity"),
-                zone=_enum(Zone, zone, "zone"),
-                status=_enum(AlertStatus, status, "status"),
-            )
+            filters = {
+                "rule_id": rule_id or None,
+                "severity": _enum(Severity, severity, "severity"),
+                "zone": _enum(Zone, zone, "zone"),
+                "status": _enum(AlertStatus, status, "status"),
+            }
+            cap = self._cap(limit, self.limits.max_alerts, self.limits.max_alerts)
+            total = self.store.count_alerts_matching(**filters)
+            alerts = self.store.query_alerts(**filters, limit=cap)
         except ValueError as exc:
             return self._bad(exc)
-        cap = self._cap(limit, self.limits.max_alerts, self.limits.max_alerts)
         return self._ok(
             {
-                "total": len(alerts),
-                "returned": min(len(alerts), cap),
-                "truncated": len(alerts) > cap,
-                "alerts": [self._alert_view(a, detail=False) for a in alerts[:cap]],
+                "total": total,
+                "returned": len(alerts),
+                "truncated": total > len(alerts),
+                "alerts": [self._alert_view(a, detail=False) for a in alerts],
             }
         )
 
@@ -471,13 +475,19 @@ class AnalystTools:
     def get_timeline(
         self, start: str | None = None, end: str | None = None, limit: int | None = None
     ) -> dict:
-        """A chronological list of what happened: events opening/closing and alert changes."""
+        """A chronological list of what happened: events opening/closing and alert changes.
+
+        Reads only what the answer can show: the first `cap` events and the first `cap` alert
+        changes in the window are enough to know the first `cap` merged items (every item is at
+        or after the start of the event/alert it belongs to), and the totals come from counts.
+        """
         try:
             lo, hi = _time(start, "start"), _time(end, "end")
         except ValueError as exc:
             return self._bad(exc)
+        cap = self._cap(limit, self.limits.max_timeline, self.limits.max_timeline)
         items: list[tuple[datetime, int, dict]] = []
-        for ev in self.store.query_events(start=lo, end=hi):
+        for ev in self.store.query_events(start=lo, end=hi, limit=cap):
             who = f"{ev.object_type.value} in {ev.zone.value}"
             items.append(
                 (
@@ -503,30 +513,29 @@ class AnalystTools:
                         },
                     )
                 )
-        for alert in self.store.query_alerts():
-            for h in alert.history:
-                if (lo and h.effective_at < lo) or (hi and h.effective_at > hi):
-                    continue
-                items.append(
-                    (
-                        h.effective_at,
-                        1 if h.kind.value == "raised" else 2,
-                        {
-                            "kind": f"alert_{h.kind.value}",
-                            "summary": f"{alert.title}: {h.to_severity.value}/{h.to_status.value}",
-                            "alert_ref": ref("alert", alert.alert_id),
-                            "actor": h.actor,
-                        },
-                    )
+        for row in self.store.timeline_alert_items(lo, hi, limit=cap):
+            items.append(
+                (
+                    datetime.fromisoformat(row["effective_at"]),
+                    1 if row["kind"] == "raised" else 2,
+                    {
+                        "kind": f"alert_{row['kind']}",
+                        "summary": f"{row['title']}: {row['to_severity']}/{row['to_status']}",
+                        "alert_ref": ref("alert", row["alert_id"]),
+                        "actor": row["actor"],
+                    },
                 )
+            )
         items.sort(key=lambda t: (t[0], t[1], str(t[2].get("event_ref") or t[2].get("alert_ref"))))
-        cap = self._cap(limit, self.limits.max_timeline, self.limits.max_timeline)
+        total = self.store.count_timeline_event_items(
+            lo, hi
+        ) + self.store.count_timeline_alert_items(lo, hi)
         shown = [{"time": t.isoformat(), **body} for t, _, body in items[:cap]]
         return self._ok(
             {
-                "total": len(items),
+                "total": total,
                 "returned": len(shown),
-                "truncated": len(items) > len(shown),
+                "truncated": total > len(shown),
                 "timeline": shown,
             }
         )

@@ -3,6 +3,7 @@
     python -m drone_agent run --scenario loiter_midnight --speed 5
     python -m drone_agent scenarios
     python -m drone_agent alert-action --db output/runs/loiter_midnight.db ALR-... acknowledge
+    python -m drone_agent scale --sizes 10000,100000,1000000 --output bench
 
 `run` processes frames and telemetry progressively on a simulated clock, persists everything to
 SQLite as it happens and shows a live dashboard. Real versus simulated is stated on screen.
@@ -30,7 +31,7 @@ from drone_agent.scenario import Scenario, ScenarioError, load_scenario
 from drone_agent.store import Store, StoreError
 
 SCENARIO_DIR = Path(__file__).resolve().parents[1] / "scenarios"
-COMMANDS = ("run", "scenarios", "alert-action")
+COMMANDS = ("run", "scenarios", "alert-action", "scale")
 
 _SEVERITY_STYLE = {
     "low": "cyan",
@@ -294,6 +295,42 @@ def _parse_time(value: str) -> datetime:
     return parsed
 
 
+def scale_command(args: argparse.Namespace, console: Console) -> int:
+    """The large-scale benchmark (opt-in: 1M observations takes several minutes)."""
+    from drone_agent.eval.scale_bench import render_markdown, run_benchmark
+
+    try:
+        sizes = tuple(int(x) for x in args.sizes.split(",") if x.strip())
+        if not sizes or any(n < 100 for n in sizes):
+            raise ValueError("--sizes must be comma-separated integers >= 100")
+        console.print(
+            Text(
+                "Generated observations through the REAL pipeline, store and analyst tools "
+                "(no model, no network). Wall-clock numbers are from THIS machine.",
+                style="dim",
+            )
+        )
+        result = run_benchmark(
+            sizes,
+            Path(args.output) if args.output else None,
+            samples=args.samples,
+            heavy_samples=args.heavy_samples,
+            log=lambda msg: console.print(Text(msg, style="dim")),
+        )
+    except (ValueError, OSError, RuntimeError) as exc:
+        _error(console, str(exc))
+        return 2
+    console.print(Text(render_markdown(result)))
+    if args.output:
+        console.print(
+            Text(
+                f"wrote {args.output}/scale_results.json, scale_report.md, scale_chart.svg",
+                style="dim",
+            )
+        )
+    return 0
+
+
 def add_parsers(sub) -> None:
     run = sub.add_parser(
         "run",
@@ -327,6 +364,19 @@ def add_parsers(sub) -> None:
 
     sub.add_parser("scenarios", help="list the scenarios that ship with the project")
 
+    scale = sub.add_parser(
+        "scale",
+        help="benchmark 10K / 100K / 1M generated observations (opt-in; minutes at 1M)",
+    )
+    scale.add_argument(
+        "--sizes", default="10000,100000,1000000", help="observation counts, comma-separated"
+    )
+    scale.add_argument("--output", help="directory for scale_results.json, scale_report.md, .svg")
+    scale.add_argument("--samples", type=int, default=60, help="timed runs per light query")
+    scale.add_argument(
+        "--heavy-samples", type=int, default=8, help="timed runs per heavy query (search, summary)"
+    )
+
     act = sub.add_parser(
         "alert-action", help="acknowledge or resolve an alert as an operator (recorded in history)"
     )
@@ -342,4 +392,6 @@ def dispatch(args: argparse.Namespace, console: Console) -> int:
         return run_command(args, console)
     if args.command == "scenarios":
         return scenarios_command(console)
+    if args.command == "scale":
+        return scale_command(args, console)
     return alert_action_command(args, console)

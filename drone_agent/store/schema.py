@@ -256,6 +256,16 @@ _V4: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_telemetry_zone ON telemetry(zone, ts_utc)",
 )
 
+_V5: tuple[str, ...] = (
+    # Read paths at scale (measured by the M13 benchmark): time-window listings and timelines,
+    # per-rule / per-entity alert listings and "which alerts cite this event". Indexes only, so
+    # every older database keeps all of its data.
+    "CREATE INDEX IF NOT EXISTS idx_events_first ON events(first_seen_utc)",
+    "CREATE INDEX IF NOT EXISTS idx_alert_history_effective ON alert_history(effective_at_utc)",
+    "CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule_id, triggered_at_utc)",
+    "CREATE INDEX IF NOT EXISTS idx_alerts_entity ON alerts(entity_id)",
+)
+
 # target schema version -> statements that bring a (version - 1) database up to it
-MIGRATIONS: dict[int, tuple[str, ...]] = {1: _V1, 2: _V2, 3: _V3, 4: _V4}
+MIGRATIONS: dict[int, tuple[str, ...]] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5}
 SCHEMA_VERSION = max(MIGRATIONS)

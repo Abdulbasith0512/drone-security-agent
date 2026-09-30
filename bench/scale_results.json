@@ -1,0 +1,277 @@
+{
+  "environment": {
+    "cpu_count": 14,
+    "note": "measurements on this machine only; not a universal performance claim",
+    "platform": "Windows-10-10.0.22631-SP0",
+    "processor": "Intel64 Family 6 Model 170 Stepping 4, GenuineIntel",
+    "python": "3.11.9",
+    "sqlite_version": "3.45.1"
+  },
+  "harness": "scale-bench-1",
+  "qualifications": [
+    "Generated observations with a small attribute vocabulary and a plate fleet; not real footage, and no vision model is involved (its latency would dominate a deployment).",
+    "One machine, one run per size; timings vary run to run. Counts are deterministic.",
+    "The sampler figures come from a SIMULATED scene-score stream: they estimate call savings if scores looked like this, not measured perception.",
+    "SQLite on a local disk, one writer; no concurrent access, no network filesystem."
+  ],
+  "scaling_exponents": {
+    "query.store_count_zone.p50": 1.42,
+    "query.store_filter_zone_window.p50": 0.05,
+    "query.store_fts_keyword_top10.p50": 1.09,
+    "query.tool_get_frame.p50": 0.11,
+    "query.tool_get_timeline_hour.p50": 0.84,
+    "query.tool_list_alerts_all.p50": 0.06,
+    "query.tool_list_alerts_rule.p50": 0.07,
+    "query.tool_query_events_window.p50": 0.77,
+    "query.tool_query_events_zone.p50": 0.76,
+    "query.tool_search_events.p50": 0.35,
+    "query.tool_summarize_run.p50": 1.03,
+    "query.tool_telemetry_at.p50": 0.06,
+    "seconds.aggregate": 1.05,
+    "seconds.generate": 1.1,
+    "seconds.ingest_sqlite": 1.0,
+    "seconds.link": 1.67,
+    "seconds.persist_derived": 0.76,
+    "seconds.rules": 1.35,
+    "seconds.sampler": 1.06,
+    "seconds.telemetry": 1.06
+  },
+  "sizes": [
+    {
+      "alerts": 565,
+      "db_bytes_per_observation": 765,
+      "db_size_mb": 7.3,
+      "detected_objects": 7199,
+      "entities": 49,
+      "events": 1385,
+      "frames_to_events": {
+        "events": 1385,
+        "frames": 10000,
+        "ratio": 7.22
+      },
+      "observations": 10000,
+      "peak_memory_mb": 52.9,
+      "queries": {
+        "store_count_zone": {
+          "max_ms": 0.121,
+          "n": 60,
+          "p50_ms": 0.043,
+          "p95_ms": 0.097
+        },
+        "store_filter_zone_window": {
+          "max_ms": 1.296,
+          "n": 60,
+          "p50_ms": 0.225,
+          "p95_ms": 0.521
+        },
+        "store_fts_keyword_top10": {
+          "max_ms": 23.142,
+          "n": 60,
+          "p50_ms": 0.85,
+          "p95_ms": 10.141
+        },
+        "tool_get_frame": {
+          "max_ms": 0.84,
+          "n": 60,
+          "p50_ms": 0.214,
+          "p95_ms": 0.499
+        },
+        "tool_get_timeline_hour": {
+          "max_ms": 1.086,
+          "n": 8,
+          "p50_ms": 0.701,
+          "p95_ms": 1.086
+        },
+        "tool_list_alerts_all": {
+          "max_ms": 3.78,
+          "n": 8,
+          "p50_ms": 1.034,
+          "p95_ms": 3.78
+        },
+        "tool_list_alerts_rule": {
+          "max_ms": 1.286,
+          "n": 8,
+          "p50_ms": 0.764,
+          "p95_ms": 1.286
+        },
+        "tool_query_events_window": {
+          "max_ms": 2.544,
+          "n": 60,
+          "p50_ms": 0.699,
+          "p95_ms": 1.574
+        },
+        "tool_query_events_zone": {
+          "max_ms": 1.08,
+          "n": 8,
+          "p50_ms": 0.726,
+          "p95_ms": 1.08
+        },
+        "tool_search_events": {
+          "max_ms": 15.659,
+          "n": 8,
+          "p50_ms": 7.173,
+          "p95_ms": 15.659
+        },
+        "tool_summarize_run": {
+          "max_ms": 20.918,
+          "n": 8,
+          "p50_ms": 11.807,
+          "p95_ms": 20.918
+        },
+        "tool_telemetry_at": {
+          "max_ms": 0.132,
+          "n": 60,
+          "p50_ms": 0.022,
+          "p95_ms": 0.034
+        }
+      },
+      "sampler_simulation": {
+        "by_reason": {
+          "event_watch": 854,
+          "first": 1,
+          "forced_refresh": 10,
+          "scene_change": 297,
+          "similar": 7208,
+          "zone_change": 1630
+        },
+        "calls_avoided_pct": 72.1,
+        "frames": 10000,
+        "note": "SIMULATED score stream (generator ground truth), not measured perception",
+        "scene_changes": 1928,
+        "vlm_calls": 2792
+      },
+      "seconds": {
+        "aggregate": 0.058,
+        "generate": 0.055,
+        "ingest_sqlite": 1.039,
+        "link": 0.011,
+        "persist_derived": 0.214,
+        "rules": 0.015,
+        "sampler": 0.015,
+        "telemetry": 0.02
+      },
+      "throughput_obs_per_s": {
+        "aggregate": 173689,
+        "ingest_sqlite": 9621
+      }
+    },
+    {
+      "alerts": 6204,
+      "db_bytes_per_observation": 771,
+      "db_size_mb": 73.52,
+      "detected_objects": 70471,
+      "entities": 498,
+      "events": 13889,
+      "frames_to_events": {
+        "events": 13889,
+        "frames": 100000,
+        "ratio": 7.2
+      },
+      "observations": 100000,
+      "peak_memory_mb": 117.8,
+      "queries": {
+        "store_count_zone": {
+          "max_ms": 2.497,
+          "n": 60,
+          "p50_ms": 1.12,
+          "p95_ms": 2.014
+        },
+        "store_filter_zone_window": {
+          "max_ms": 1.304,
+          "n": 60,
+          "p50_ms": 0.253,
+          "p95_ms": 0.553
+        },
+        "store_fts_keyword_top10": {
+          "max_ms": 118.962,
+          "n": 60,
+          "p50_ms": 10.467,
+          "p95_ms": 110.793
+        },
+        "tool_get_frame": {
+          "max_ms": 2.183,
+          "n": 60,
+          "p50_ms": 0.277,
+          "p95_ms": 1.336
+        },
+        "tool_get_timeline_hour": {
+          "max_ms": 11.45,
+          "n": 8,
+          "p50_ms": 4.826,
+          "p95_ms": 11.45
+        },
+        "tool_list_alerts_all": {
+          "max_ms": 2.802,
+          "n": 8,
+          "p50_ms": 1.181,
+          "p95_ms": 2.802
+        },
+        "tool_list_alerts_rule": {
+          "max_ms": 1.96,
+          "n": 8,
+          "p50_ms": 0.888,
+          "p95_ms": 1.96
+        },
+        "tool_query_events_window": {
+          "max_ms": 17.816,
+          "n": 60,
+          "p50_ms": 4.121,
+          "p95_ms": 11.779
+        },
+        "tool_query_events_zone": {
+          "max_ms": 8.619,
+          "n": 8,
+          "p50_ms": 4.146,
+          "p95_ms": 8.619
+        },
+        "tool_search_events": {
+          "max_ms": 121.711,
+          "n": 8,
+          "p50_ms": 16.238,
+          "p95_ms": 121.711
+        },
+        "tool_summarize_run": {
+          "max_ms": 140.896,
+          "n": 8,
+          "p50_ms": 125.089,
+          "p95_ms": 140.896
+        },
+        "tool_telemetry_at": {
+          "max_ms": 0.131,
+          "n": 60,
+          "p50_ms": 0.025,
+          "p95_ms": 0.038
+        }
+      },
+      "sampler_simulation": {
+        "by_reason": {
+          "event_watch": 8198,
+          "first": 1,
+          "forced_refresh": 133,
+          "scene_change": 2870,
+          "similar": 72146,
+          "zone_change": 16652
+        },
+        "calls_avoided_pct": 72.1,
+        "frames": 100000,
+        "note": "SIMULATED score stream (generator ground truth), not measured perception",
+        "scene_changes": 19523,
+        "vlm_calls": 27854
+      },
+      "seconds": {
+        "aggregate": 0.651,
+        "generate": 0.685,
+        "ingest_sqlite": 10.419,
+        "link": 0.518,
+        "persist_derived": 1.224,
+        "rules": 0.339,
+        "sampler": 0.173,
+        "telemetry": 0.23
+      },
+      "throughput_obs_per_s": {
+        "aggregate": 153623,
+        "ingest_sqlite": 9598
+      }
+    }
+  ]
+}

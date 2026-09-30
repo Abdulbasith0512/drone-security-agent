@@ -10,37 +10,33 @@ from drone_agent.store import Store
 
 
 def run_facts(store: Store, limits: ToolLimits | None = None) -> dict:
+    """Bounded, structured facts about the whole run. Only the shown rows are loaded: totals and
+    breakdowns come from SQL counts, so the cost does not grow with the size of the run."""
     limits = limits or ToolLimits()
     span = store.observation_span()
     sources = store.observation_counts_by("source")
     provenance = store.observation_counts_by("provenance")
-    events = store.query_events()
-    alerts = store.query_alerts()
-    entities = store.list_entities()
-    alert_ids_by_event: dict[str, list[str]] = {}
-    for a in alerts:
-        for ev_id in a.event_ids:
-            alert_ids_by_event.setdefault(ev_id, []).append(a.alert_id)
+    events = store.query_events(limit=limits.max_events)
+    alerts = store.query_alerts(limit=limits.max_alerts)
+    entities = store.list_entities(limit=limits.max_entities)
+    events_total, alerts_total = store.count_events(), store.count_alerts()
+    entities_total = store.count_entities()
+    alert_ids_by_event = store.alert_ids_by_event([ev.event_id for ev in events])
 
     event_views = []
-    for ev in events[: limits.max_events]:
+    for ev in events:
         view = event_view(ev, limits, detail=False)
         view["alert_refs"] = [f"alert:{a}" for a in alert_ids_by_event.get(ev.event_id, [])]
         event_views.append(view)
-    by_severity: dict[str, int] = {}
-    by_rule: dict[str, int] = {}
-    for a in alerts:
-        by_severity[a.severity.value] = by_severity.get(a.severity.value, 0) + 1
-        by_rule[a.rule_id] = by_rule.get(a.rule_id, 0) + 1
 
     facts = {
         "counts": {
             "frames": store.count_frames(),
             "observations": store.count_observations(),
             "detected_objects": store.count_detected_objects(),
-            "events": len(events),
-            "entities": len(entities),
-            "alerts": len(alerts),
+            "events": events_total,
+            "entities": entities_total,
+            "alerts": alerts_total,
         },
         "observation_span": (
             {"first": span[0].isoformat(), "last": span[1].isoformat()} if span else None
@@ -52,18 +48,19 @@ def run_facts(store: Store, limits: ToolLimits | None = None) -> dict:
         "sources": sources,
         "provenance": provenance,
         "events": event_views,
-        "events_total": len(events),
-        "events_truncated": len(events) > limits.max_events,
-        "alerts": [alert_view(a, limits, detail=False) for a in alerts[: limits.max_alerts]],
-        "alerts_total": len(alerts),
-        "alerts_truncated": len(alerts) > limits.max_alerts,
-        "alerts_by_severity": by_severity,
-        "alerts_by_rule": by_rule,
-        "entities": [entity_view(e) for e in entities[: limits.max_entities]],
-        "entities_total": len(entities),
+        "events_total": events_total,
+        "events_truncated": events_total > len(events),
+        "alerts": [alert_view(a, limits, detail=False) for a in alerts],
+        "alerts_total": alerts_total,
+        "alerts_truncated": alerts_total > len(alerts),
+        "alerts_by_severity": store.alert_counts_by("severity"),
+        "alerts_by_rule": store.alert_counts_by("rule"),
+        "alerts_by_status": store.alert_counts_by("status"),
+        "entities": [entity_view(e) for e in entities],
+        "entities_total": entities_total,
     }
     facts["limitations"] = limitations(
-        store, sources, provenance, len(events), len(alerts), len(entities)
+        store, sources, provenance, events_total, alerts_total, entities_total
     )
     return facts
 

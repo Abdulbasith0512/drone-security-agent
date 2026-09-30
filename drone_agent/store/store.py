@@ -309,18 +309,23 @@ class Store(DerivedMixin, RunsMixin):
         text: str | None = None,
     ) -> int:
         """How many observations `query_observations` would return without a limit."""
-        sql, params = self._build_query(start, end, zone, object_type, text, None)
-        return self._conn.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
+        sql, params = self._build_query(start, end, zone, object_type, text, None, count_only=True)
+        return self._conn.execute(sql, params).fetchone()[0]
 
     def observation_span(self) -> tuple[datetime, datetime] | None:
         """Timestamps of the earliest and latest observation (None if there are none)."""
+        # MIN/MAX(ts_utc) are index seeks; ordering by (ts_utc, frame_id) would scan every row
+        # because frame_id is not part of the index. The tie-break only picks among frames that
+        # share the extreme timestamp, so it runs on those few rows.
         first = self._conn.execute(
-            "SELECT timestamp FROM observations ORDER BY ts_utc, frame_id LIMIT 1"
+            "SELECT timestamp FROM observations"
+            " WHERE ts_utc = (SELECT MIN(ts_utc) FROM observations) ORDER BY frame_id LIMIT 1"
         ).fetchone()
         if first is None:
             return None
         last = self._conn.execute(
-            "SELECT timestamp FROM observations ORDER BY ts_utc DESC, frame_id DESC LIMIT 1"
+            "SELECT timestamp FROM observations"
+            " WHERE ts_utc = (SELECT MAX(ts_utc) FROM observations) ORDER BY frame_id DESC LIMIT 1"
         ).fetchone()
         return datetime.fromisoformat(first[0]), datetime.fromisoformat(last[0])
 
@@ -434,6 +439,7 @@ class Store(DerivedMixin, RunsMixin):
         object_type: ObjectType | None,
         text: str | None,
         limit: int | None,
+        count_only: bool = False,
     ) -> tuple[str, list[object]]:
         joins, where, params = "", [], []
         order = "o.ts_utc, o.frame_id"
@@ -457,6 +463,11 @@ class Store(DerivedMixin, RunsMixin):
                 " WHERE d.observation_id = o.observation_id AND d.object_type = ?)"
             )
             params.append(ObjectType(object_type).value)
+        if count_only:  # no columns, telemetry join, ordering or limit: an index-only count
+            sql = "SELECT COUNT(*)" + self._FROM + joins
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            return sql, params
         sql = self._COLUMNS + self._FROM + joins + self._TELEMETRY_JOIN
         if where:
             sql += " WHERE " + " AND ".join(where)

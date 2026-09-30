@@ -235,21 +235,18 @@ class DerivedMixin:
         rows = self._event_rows("e.event_id = ?", [event_id])
         return rows[0] if rows else None
 
-    def query_events(
-        self,
-        *,
-        zone: Zone | None = None,
-        object_type: ObjectType | None = None,
-        entity_id: str | None = None,
-        start: datetime | None = None,
-        end: datetime | None = None,
-        open_only: bool = False,
-    ) -> list[Event]:
-        """Events matching ALL given filters, ordered by first_seen then event_id.
-
-        `start`/`end` select events whose [first_seen, last_seen] overlaps that time range.
-        """
-        where, params = [], []
+    @staticmethod
+    def _event_filter(
+        zone: Zone | None,
+        object_type: ObjectType | None,
+        entity_id: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        open_only: bool,
+        closed_only: bool = False,
+    ) -> tuple[str, list[object]]:
+        where: list[str] = []
+        params: list[object] = []
         if zone is not None:
             where.append("e.zone = ?")
             params.append(Zone(zone).value)
@@ -267,7 +264,66 @@ class DerivedMixin:
             params.append(utc_key(end))
         if open_only:
             where.append("e.status = 'open'")
-        return self._event_rows(" AND ".join(where) or "1 = 1", params)
+        if closed_only:
+            where.append("e.status = 'closed'")
+        return " AND ".join(where) or "1 = 1", params
+
+    def query_events(
+        self,
+        *,
+        zone: Zone | None = None,
+        object_type: ObjectType | None = None,
+        entity_id: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        open_only: bool = False,
+        closed_only: bool = False,
+        limit: int | None = None,
+    ) -> list[Event]:
+        """Events matching ALL given filters, ordered by first_seen then event_id (earliest
+        first; `limit` keeps the first N, so a bounded caller never loads the rest).
+
+        `start`/`end` select events whose [first_seen, last_seen] overlaps that time range.
+        """
+        condition, params = self._event_filter(
+            zone, object_type, entity_id, start, end, open_only, closed_only
+        )
+        return self._event_rows(condition, params, limit)
+
+    def count_events_matching(
+        self,
+        *,
+        zone: Zone | None = None,
+        object_type: ObjectType | None = None,
+        entity_id: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        open_only: bool = False,
+        closed_only: bool = False,
+    ) -> int:
+        """How many events `query_events` would return without a limit."""
+        condition, params = self._event_filter(
+            zone, object_type, entity_id, start, end, open_only, closed_only
+        )
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM events e LEFT JOIN entity_events ee ON ee.event_id = e.event_id"
+            f" WHERE {condition}",
+            params,
+        ).fetchone()[0]
+
+    def count_timeline_event_items(
+        self, start: datetime | None = None, end: datetime | None = None
+    ) -> int:
+        """Timeline items the events in a window contribute: one "opened" each, plus one
+        "closed" for every closed event that lasted more than a single instant."""
+        condition, params = self._event_filter(None, None, None, start, end, False)
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS opened, COALESCE(SUM(e.status = 'closed'"
+            " AND e.last_seen_utc != e.first_seen_utc), 0) AS closed FROM events e"
+            f" WHERE {condition}",
+            params,
+        ).fetchone()
+        return row["opened"] + row["closed"]
 
     def get_event_observations(self, event_id: str) -> list[Observation]:
         """The evidence for an event: its observations (with frame ids), chronologically."""
@@ -303,8 +359,9 @@ class DerivedMixin:
         rows = self._entity_rows("entity_id = ?", [entity_id])
         return rows[0] if rows else None
 
-    def list_entities(self) -> list[Entity]:
-        return self._entity_rows("1 = 1", [])
+    def list_entities(self, limit: int | None = None) -> list[Entity]:
+        """Entities earliest first; `limit` keeps the first N."""
+        return self._entity_rows("1 = 1", [], limit)
 
     def count_events(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
@@ -312,13 +369,18 @@ class DerivedMixin:
     def count_entities(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
 
-    def _event_rows(self, condition: str, params: list[object]) -> list[Event]:
-        rows = self._conn.execute(
+    def _event_rows(
+        self, condition: str, params: list[object], limit: int | None = None
+    ) -> list[Event]:
+        sql = (
             "SELECT e.*, ee.entity_id FROM events e"
             " LEFT JOIN entity_events ee ON ee.event_id = e.event_id"
-            f" WHERE {condition} ORDER BY e.first_seen_utc, e.event_id",
-            params,
-        ).fetchall()
+            f" WHERE {condition} ORDER BY e.first_seen_utc, e.event_id"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = [*params, int(limit)]
+        rows = self._conn.execute(sql, params).fetchall()
         evidence: dict[str, list[tuple[str, int]]] = {r["event_id"]: [] for r in rows}
         ids = list(evidence)
         for i in range(0, len(ids), _IN_CHUNK):
@@ -356,20 +418,27 @@ class DerivedMixin:
             for r in rows
         ]
 
-    def _entity_rows(self, condition: str, params: list[object]) -> list[Entity]:
-        rows = self._conn.execute(
-            f"SELECT * FROM entities WHERE {condition} ORDER BY first_seen_utc, entity_id",
-            params,
-        ).fetchall()
+    def _entity_rows(
+        self, condition: str, params: list[object], limit: int | None = None
+    ) -> list[Entity]:
+        sql = f"SELECT * FROM entities WHERE {condition} ORDER BY first_seen_utc, entity_id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = [*params, int(limit)]
+        rows = self._conn.execute(sql, params).fetchall()
         members: dict[str, list[str]] = {r["entity_id"]: [] for r in rows}
         scores: dict[str, dict[str, float]] = {r["entity_id"]: {} for r in rows}
         components: dict[str, dict[str, dict[str, float]]] = {r["entity_id"]: {} for r in rows}
-        for r in self._conn.execute(
-            "SELECT ee.entity_id, ee.event_id, ee.link_score, ee.link_components_json"
-            " FROM entity_events ee"
-            " JOIN events e ON e.event_id = ee.event_id ORDER BY e.first_seen_utc, e.event_id"
-        ):
-            if r["entity_id"] in members:
+        ids = list(members)
+        for i in range(0, len(ids), _IN_CHUNK):  # only the returned entities' links are read
+            chunk = ids[i : i + _IN_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            for r in self._conn.execute(
+                "SELECT ee.entity_id, ee.event_id, ee.link_score, ee.link_components_json"
+                " FROM entity_events ee JOIN events e ON e.event_id = ee.event_id"
+                f" WHERE ee.entity_id IN ({marks}) ORDER BY e.first_seen_utc, e.event_id",
+                chunk,
+            ):
                 members[r["entity_id"]].append(r["event_id"])
                 if r["link_score"] is not None:
                     scores[r["entity_id"]][r["event_id"]] = r["link_score"]
@@ -510,17 +579,17 @@ class DerivedMixin:
         rows = self._alert_rows("a.alert_id = ?", [alert_id])
         return rows[0] if rows else None
 
-    def query_alerts(
-        self,
-        *,
-        rule_id: str | None = None,
-        severity: Severity | None = None,
-        zone: Zone | None = None,
-        status: AlertStatus | None = None,
-        active_only: bool = False,
-    ) -> list[Alert]:
-        """Alerts matching ALL given filters, ordered by triggered_at then alert_id."""
-        where, params = [], []
+    @staticmethod
+    def _alert_filter(
+        rule_id: str | None,
+        severity: Severity | None,
+        zone: Zone | None,
+        status: AlertStatus | None,
+        active_only: bool,
+        entity_id: str | None = None,
+    ) -> tuple[str, list[object]]:
+        where: list[str] = []
+        params: list[object] = []
         if rule_id is not None:
             where.append("a.rule_id = ?")
             params.append(rule_id)
@@ -535,13 +604,128 @@ class DerivedMixin:
             params.append(AlertStatus(status).value)
         if active_only:
             where.append("a.status != 'resolved'")
-        return self._alert_rows(" AND ".join(where) or "1 = 1", params)
+        if entity_id is not None:
+            where.append("a.entity_id = ?")
+            params.append(entity_id)
+        return " AND ".join(where) or "1 = 1", params
 
-    def _alert_rows(self, condition: str, params: list[object]) -> list[Alert]:
+    def query_alerts(
+        self,
+        *,
+        rule_id: str | None = None,
+        severity: Severity | None = None,
+        zone: Zone | None = None,
+        status: AlertStatus | None = None,
+        active_only: bool = False,
+        entity_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[Alert]:
+        """Alerts matching ALL given filters, ordered by triggered_at then alert_id (earliest
+        first; `limit` keeps the first N, so a bounded caller never loads the rest)."""
+        condition, params = self._alert_filter(
+            rule_id, severity, zone, status, active_only, entity_id
+        )
+        return self._alert_rows(condition, params, limit)
+
+    def count_alerts_matching(
+        self,
+        *,
+        rule_id: str | None = None,
+        severity: Severity | None = None,
+        zone: Zone | None = None,
+        status: AlertStatus | None = None,
+        active_only: bool = False,
+        entity_id: str | None = None,
+    ) -> int:
+        """How many alerts `query_alerts` would return without a limit."""
+        condition, params = self._alert_filter(
+            rule_id, severity, zone, status, active_only, entity_id
+        )
+        return self._conn.execute(
+            f"SELECT COUNT(*) FROM alerts a WHERE {condition}", params
+        ).fetchone()[0]
+
+    def alert_counts_by(self, column: str) -> dict[str, int]:
+        """Alert counts per severity, rule or status (a fixed whitelist, never user text)."""
+        names = {"severity": "severity", "rule": "rule_id", "status": "status"}
+        if column not in names:
+            raise ValueError("column must be 'severity', 'rule' or 'status'")
+        field_name = names[column]
         rows = self._conn.execute(
-            f"SELECT a.* FROM alerts a WHERE {condition} ORDER BY a.triggered_at_utc, a.alert_id",
-            params,
-        ).fetchall()
+            f"SELECT {field_name} AS k, COUNT(*) AS n FROM alerts GROUP BY {field_name}"
+            " ORDER BY MIN(triggered_at_utc), k"
+        )
+        return {r["k"]: r["n"] for r in rows}
+
+    def alerts_for_events(self, event_ids: list[str], limit: int | None = None) -> list[Alert]:
+        """Alerts that cite any of these events (earliest first)."""
+        if not event_ids:
+            return []
+        marks = ",".join("?" * len(event_ids))
+        return self._alert_rows(
+            f"a.alert_id IN (SELECT alert_id FROM alert_events WHERE event_id IN ({marks}))",
+            list(event_ids),
+            limit,
+        )
+
+    def alert_ids_by_event(self, event_ids: list[str]) -> dict[str, list[str]]:
+        """For each event, the ids of the alerts that cite it (in chronological alert order)."""
+        out: dict[str, list[str]] = {}
+        for i in range(0, len(event_ids), _IN_CHUNK):
+            chunk = event_ids[i : i + _IN_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            for r in self._conn.execute(
+                "SELECT ae.event_id, ae.alert_id FROM alert_events ae"
+                " JOIN alerts a ON a.alert_id = ae.alert_id"
+                f" WHERE ae.event_id IN ({marks}) ORDER BY a.triggered_at_utc, a.alert_id",
+                chunk,
+            ):
+                out.setdefault(r["event_id"], []).append(r["alert_id"])
+        return out
+
+    def timeline_alert_items(
+        self, start: datetime | None, end: datetime | None, limit: int | None = None
+    ) -> list[dict]:
+        """Alert lifecycle changes whose effective time falls in [start, end], earliest first."""
+        where, params = self._history_window(start, end)
+        sql = (
+            "SELECT h.alert_id, a.title, h.kind, h.effective_at, h.to_severity, h.to_status,"
+            " h.actor FROM alert_history h JOIN alerts a ON a.alert_id = h.alert_id"
+            f" WHERE {where} ORDER BY h.effective_at_utc,"
+            " CASE h.kind WHEN 'raised' THEN 1 ELSE 2 END, h.alert_id, h.seq"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = [*params, int(limit)]
+        return [dict(r) for r in self._conn.execute(sql, params)]
+
+    def count_timeline_alert_items(
+        self, start: datetime | None = None, end: datetime | None = None
+    ) -> int:
+        where, params = self._history_window(start, end)
+        return self._conn.execute(
+            f"SELECT COUNT(*) FROM alert_history h WHERE {where}", params
+        ).fetchone()[0]
+
+    @staticmethod
+    def _history_window(start: datetime | None, end: datetime | None) -> tuple[str, list[object]]:
+        where, params = [], []
+        if start is not None:
+            where.append("h.effective_at_utc >= ?")
+            params.append(utc_key(start))
+        if end is not None:
+            where.append("h.effective_at_utc <= ?")
+            params.append(utc_key(end))
+        return " AND ".join(where) or "1 = 1", params
+
+    def _alert_rows(
+        self, condition: str, params: list[object], limit: int | None = None
+    ) -> list[Alert]:
+        sql = f"SELECT a.* FROM alerts a WHERE {condition} ORDER BY a.triggered_at_utc, a.alert_id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = [*params, int(limit)]
+        rows = self._conn.execute(sql, params).fetchall()
         events: dict[str, list[str]] = {r["alert_id"]: [] for r in rows}
         frames: dict[str, set[int]] = {r["alert_id"]: set() for r in rows}
         telemetry: dict[str, list[datetime]] = {r["alert_id"]: [] for r in rows}

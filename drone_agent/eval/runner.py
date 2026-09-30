@@ -229,13 +229,28 @@ def build_ablation_table(results: dict[str, ExperimentResult]) -> list[dict]:
     )
     sp = results["semantic_probe"].measured
     ck = sp["checker"]
+    pg = sp["production_gate"]
     rows.append(
         {
-            "component": "Claim-consistency prototype (eval-only)",
+            "component": "Factual-claim validation (production)",
+            "metric": f"semantically unsupported answers accepted (of {sp['unsupported_cases']})",
+            "baseline_setting": "citation gate + facts read from the answer text (production)",
+            "baseline": pg["unsupported_accepted"],
+            "ablated_setting": "citation gate alone (before factual validation)",
+            "ablated": ck["unsupported_accepted_gate_alone"],
+            "effect": _signed(pg["unsupported_accepted"] - ck["unsupported_accepted_gate_alone"]),
+            "interpretation": "checks structured facts only (zone, time, duration, severity, "
+            f"status, rule, activity, counts); true controls rejected: {pg['controls_rejected']}; "
+            "remaining passes: " + ", ".join(pg["still_accepted_categories"]),
+        }
+    )
+    rows.append(
+        {
+            "component": "Claim-consistency prototype (eval-only, hand-structured claims)",
             "metric": f"semantically unsupported answers accepted (of {sp['unsupported_cases']})",
             "baseline_setting": "citation gate + structured claim checker",
             "baseline": ck["unsupported_accepted_gate_plus_checker"],
-            "ablated_setting": "citation gate alone (production)",
+            "ablated_setting": "citation gate alone (before factual validation)",
             "ablated": ck["unsupported_accepted_gate_alone"],
             "effect": _signed(
                 ck["unsupported_accepted_gate_plus_checker"] - ck["unsupported_accepted_gate_alone"]

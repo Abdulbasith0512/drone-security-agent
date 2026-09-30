@@ -60,9 +60,12 @@ class CallStats:
     rounds: int = 0
     tool_calls: int = 0
     tools: list[str] = field(default_factory=list)
+    # tool calls that failed (unknown tool, bad arguments, oversized result): a failed lookup is
+    # not evidence of absence, so a refusal that follows one is not accepted as truthful
+    tool_errors: int = 0
 
     def reset(self) -> None:
-        self.rounds, self.tool_calls, self.tools = 0, 0, []
+        self.rounds, self.tool_calls, self.tools, self.tool_errors = 0, 0, [], 0
 
 
 @dataclass(frozen=True)
@@ -121,9 +124,19 @@ def _correction(report: CitationReport) -> str:
         "Your answer was rejected by the evidence check: "
         + "; ".join(report.problems())
         + ". Rewrite it using only ids returned by the tools (call them again if needed), cite "
-        "every factual sentence as [kind:id], avoid identity or intent claims, or reply "
-        "'Insufficient evidence'."
+        "every factual sentence as [kind:id], state zones, times, durations, counts, severities "
+        "and statuses exactly as the tools returned them, avoid identity or intent claims, or "
+        "reply 'Insufficient evidence'."
     )
+
+
+_TOOL_FAILURE_CORRECTION = (
+    "One of your tool calls returned an error, so you have not actually looked at the evidence "
+    "yet. Call only the tools you were given, exactly by their names and with valid "
+    "arguments, then "
+    "answer from what they return. Reply 'Insufficient evidence' only if valid tool calls "
+    "succeeded and returned nothing relevant."
+)
 
 
 class AnalystSession:
@@ -134,8 +147,12 @@ class AnalystSession:
         limits: ToolLimits | None = None,
         max_turns: int = MAX_HISTORY_TURNS,
         record: bool = False,
+        check_facts: bool = True,
     ) -> None:
         self.store = store
+        # Model-written answers must also agree with the stored facts they cite (factcheck.py).
+        # Only the evaluation turns this off, to measure the citation-only gate as a baseline.
+        self.check_facts = check_facts
         self.llm = llm
         self.tools = AnalystTools(store, limits, fit_results=llm is not None)
         self.offline = OfflineAnalyst(self.tools)
@@ -161,12 +178,12 @@ class AnalystSession:
     def summarize(self) -> Answer:
         mark = len(self.tools.calls)
         if self.llm is None:
-            text = render_summary(self.tools.get_run_summary())
+            text = render_summary(self.tools.summarize_run())
             answer = self._checked_template(text, "template")
         else:
             answer = self._measured(
                 lambda: self._llm_answer(
-                    SUMMARY_REQUEST, fallback=lambda: render_summary(self.tools.get_run_summary())
+                    SUMMARY_REQUEST, fallback=lambda: render_summary(self.tools.summarize_run())
                 )
             )
         answer.tool_trace = list(self.tools.calls[mark:])
@@ -223,6 +240,7 @@ class AnalystSession:
             retrieved=self.tools.retrieved,
             require_citation=not is_pure_refusal(text),
             sentence_level=True,
+            fact_check=self.check_facts,
         )
 
     def _llm_answer(self, question: str, fallback=None) -> Answer:
@@ -230,7 +248,9 @@ class AnalystSession:
         history = list(self.history)
         correction = None
         notes: list[str] = []
+        lookup_failed = False  # a tool call failed earlier in this answer
         for attempt in (1, 2):
+            errors_before, calls_before = self._tool_errors(), self._tool_calls()
             try:
                 text = self.llm.respond(
                     ANALYST_SYSTEM_PROMPT, history, question, self.tools, correction
@@ -249,6 +269,23 @@ class AnalystSession:
                         notes.append(
                             "repaired citation(s): " + ", ".join(f"{a} -> {b}" for a, b in repairs)
                         )
+            failed = self._tool_errors() - errors_before
+            succeeded = self._tool_calls() - calls_before - failed
+            lookup_failed = lookup_failed or failed > 0
+            # A failed lookup (unknown tool, bad arguments) is not evidence that nothing is stored,
+            # so "Insufficient evidence" is accepted only if this attempt made no failed call and,
+            # once a lookup has failed, at least one successful call since.
+            if (
+                report.ok
+                and is_pure_refusal(text)
+                and (failed or (lookup_failed and not succeeded))
+            ):
+                notes.append(
+                    f"attempt {attempt} rejected: a tool call failed and no successful lookup "
+                    'followed, so "Insufficient evidence" does not show that the evidence is absent'
+                )
+                correction = (text, _TOOL_FAILURE_CORRECTION)
+                continue
             if report.ok:
                 return Answer(
                     text,
@@ -264,6 +301,14 @@ class AnalystSession:
         answer = self._fall_back(question, notes, fallback)
         answer.retried = True
         return answer
+
+    def _tool_errors(self) -> int:
+        stats = getattr(self.llm, "stats", None)
+        return stats.tool_errors if isinstance(stats, CallStats) else 0
+
+    def _tool_calls(self) -> int:
+        stats = getattr(self.llm, "stats", None)
+        return stats.tool_calls if isinstance(stats, CallStats) else 0
 
     def _fall_back(self, question: str, notes: list[str], fallback) -> Answer:
         if fallback is not None:

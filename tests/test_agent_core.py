@@ -13,7 +13,7 @@ from drone_agent.agent.citations import (
 )
 from drone_agent.agent.evidence import ToolLimits
 from drone_agent.agent.offline import OfflineAnalyst
-from drone_agent.agent.prompt import ANALYST_SYSTEM_PROMPT
+from drone_agent.agent.prompt import ANALYST_SYSTEM_PROMPT, SUMMARY_REQUEST
 from drone_agent.agent.session import AnalystLLMError, AnalystSession
 from drone_agent.agent.summary import render_summary, run_facts
 from drone_agent.agent.tools import TOOL_NAMES, AnalystTools
@@ -61,7 +61,7 @@ def test_the_tool_set_is_a_fixed_read_only_list_with_no_sql_or_generic_execution
     # Older methods stay for the deterministic template analyst; a model is never offered them.
     template_only = {
         "search_observations", "list_events", "get_event_evidence", "get_entity",
-        "get_entity_history", "get_run_summary", "trace",
+        "get_entity_history", "trace",
     }  # fmt: skip
     public = {n for n in dir(tools) if not n.startswith("_") and callable(getattr(tools, n))}
     assert public == set(TOOL_NAMES) | template_only
@@ -81,7 +81,7 @@ def test_tools_never_change_the_database(db_path):
         before = counts(s)
         t = AnalystTools(s)
         t.search_observations(query="pickup")
-        t.list_events(), t.list_alerts(), t.list_entities(), t.get_run_summary()
+        t.list_events(), t.list_alerts(), t.list_entities(), t.summarize_run()
         t.get_alert("ALR-LOITER-EVT-P-001"), t.get_event_evidence("EVT-P-001")
         t.get_entity_history("ENT-V-001"), t.get_event("nope"), t.get_alert("nope")
         assert counts(s) == before
@@ -166,7 +166,7 @@ def test_event_evidence_is_bounded_and_entity_history_lists_every_appearance(sto
 
 
 def test_run_summary_facts(tools):
-    facts = tools.get_run_summary()
+    facts = tools.summarize_run()
     assert facts["counts"] == {
         "frames": 27, "observations": 27, "detected_objects": 20, "events": 7,
         "entities": 2, "alerts": 7,
@@ -211,6 +211,18 @@ def test_system_prompt_states_the_required_constraints(phrase):
 
 
 # ---- citations ------------------------------------------------------------------------------
+def test_every_tool_the_prompts_tell_the_model_to_call_is_registered():
+    """A prompt that names a tool the model is not given sends it into an 'unknown tool' error."""
+    named = set(
+        re.findall(
+            r"\b(?:get|list|search|summarize|entity|telemetry)_[a-z_]+\b",
+            ANALYST_SYSTEM_PROMPT + SUMMARY_REQUEST,
+        )
+    )
+    assert "summarize_run" in named
+    assert named <= set(TOOL_NAMES), named - set(TOOL_NAMES)
+
+
 def test_citation_extraction_is_ordered_deduplicated_and_strict():
     text = "A [entity:ENT-V-001] then [event:EVT-V-001] [event:EVT-V-001] [frame:10] [obs:obs-10]"
     assert [c.token for c in extract_citations(text)] == [
@@ -486,11 +498,11 @@ def test_an_unavailable_llm_degrades_to_the_template_analyst(store):
 
 def test_llm_summary_is_checked_and_falls_back_to_the_facts(store):
     good = ScriptedLLM(
-        lambda t: (t.get_run_summary(), "Six alerts fired, e.g. [alert:ALR-LOITER-EVT-P-001].")[1]
+        lambda t: (t.summarize_run(), "Seven alerts fired, e.g. [alert:ALR-LOITER-EVT-P-001].")[1]
     )
     ans = AnalystSession(store, good).summarize()
-    assert ans.mode == "llm" and "Six alerts" in ans.text
-    assert "get_run_summary" in good.calls[0]["q"] and "Do not invent events" in good.calls[0]["q"]
+    assert ans.mode == "llm" and "Seven alerts" in ans.text
+    assert "summarize_run" in good.calls[0]["q"] and "Do not invent events" in good.calls[0]["q"]
     bad = ScriptedLLM("Invented [event:EVT-Q-1].", "Invented again [event:EVT-Q-2].")
     ans = AnalystSession(store, bad).summarize()
     assert ans.mode == "fallback" and "27 observation(s)" in ans.text and "EVT-Q" not in ans.text

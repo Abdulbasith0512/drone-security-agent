@@ -619,8 +619,6 @@ class AnalystTools:
     def summarize_run(self) -> dict:
         return self._ok(run_facts(self.store, self.limits))
 
-    get_run_summary = summarize_run  # the name the template analyst uses
-
 
 def telemetry_sample_label(sample: Telemetry) -> str:
     """One line for a telemetry sample, for answers that quote it."""

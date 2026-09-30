@@ -340,7 +340,7 @@ class OfflineAnalyst:
 
     # -- telemetry, time windows, person recurrence -----------------------------------------
     def _span(self) -> tuple[datetime, datetime] | None:
-        span = self.tools.get_run_summary().get("observation_span")
+        span = self.tools.summarize_run().get("observation_span")
         if not span:
             return None
         return datetime.fromisoformat(span["first"]), datetime.fromisoformat(span["last"])
@@ -552,10 +552,10 @@ class OfflineAnalyst:
 
     # -- run level --------------------------------------------------------------------------
     def _summary(self) -> OfflineAnswer:
-        return OfflineAnswer(render_summary(self.tools.get_run_summary()), None, "summary")
+        return OfflineAnswer(render_summary(self.tools.summarize_run()), None, "summary")
 
     def _objects(self, compound: bool = False) -> OfflineAnswer:
-        facts = self.tools.get_run_summary()
+        facts = self.tools.summarize_run()
         if not facts["counts"]["observations"]:
             return OfflineAnswer(
                 "Insufficient evidence: no observations are stored.", matched="objects-none"

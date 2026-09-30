@@ -149,17 +149,21 @@ def test_unknown_tools_and_bad_arguments_are_reported_back_not_raised(db_path):
                 {"name": "get_alert", "args": {"wrong_arg": 1}, "id": "b"},
             ]),
             AIMessage(content="Insufficient evidence."),
+            AIMessage(content="Insufficient evidence."),  # repeated after the correction
         )  # fmt: skip
         answer = AnalystSession(store, LangChainAnalyst(chat)).ask("q")
-        assert answer.mode == "llm"
         results = [m.content for m in chat.seen[1] if isinstance(m, ToolMessage)]
         assert "unknown tool 'run_sql'" in results[0] and "error" in results[1]
         assert store.count_alerts() == 7  # nothing was executed against the database
+        # the model only ever saw errors, so its refusal proves nothing about the evidence: it is
+        # not shown as a model answer, and the deterministic template answers from the store
+        assert answer.mode == "fallback" and answer.metrics.fallback
+        assert any("does not show that the evidence is absent" in n for n in answer.notes)
 
 
 def test_tool_loop_is_bounded(db_path):
     with Store.open(db_path) as store:
-        endless = FakeChatModel(*[call("get_run_summary", call_id=f"c{i}") for i in range(20)])
+        endless = FakeChatModel(*[call("summarize_run", call_id=f"c{i}") for i in range(20)])
         with pytest.raises(AnalystLLMError, match="did not finish"):
             LangChainAnalyst(endless).respond("s", [], "q", AnalystTools(store))
         wide = FakeChatModel(
@@ -411,7 +415,7 @@ def test_metrics_count_the_correction_attempt_and_the_fallback(db_path):
 def test_stats_reset_between_questions(db_path):
     with Store.open(db_path) as store:
         chat = FakeChatModel(
-            call("get_run_summary"),
+            call("summarize_run"),
             AIMessage(content="Insufficient evidence."),
             AIMessage(content="Insufficient evidence."),
         )

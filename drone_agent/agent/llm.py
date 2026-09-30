@@ -119,6 +119,15 @@ def build_chat_model(config: AnalystConfig) -> Any:
     )  # no temperature: the Gemini 3.x chat models reject the argument
 
 
+def _is_error(result: Any) -> bool:
+    """Did a tool call fail? Tools report failure as a JSON object with an `error` key."""
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else result
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and "error" in parsed
+
+
 def _flatten(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -193,5 +202,7 @@ class LangChainAnalyst:
                         result = tool.invoke(call.get("args") or {})
                     except Exception as exc:  # bad arguments from the model
                         result = json.dumps({"error": f"{type(exc).__name__}: {str(exc)[:200]}"})
+                if _is_error(result):
+                    self.stats.tool_errors += 1
                 messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
         raise AnalystLLMError("tool-calling loop did not finish")

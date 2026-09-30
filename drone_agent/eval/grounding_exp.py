@@ -58,9 +58,16 @@ class _ScriptedAnalyst:
         return self.text
 
 
-def gate_accepts(store: Store, text: str, prep: list[Prep]) -> tuple[bool, list[str]]:
-    """Would the production session show this answer as-is? Returns (accepted, reasons)."""
-    answer = AnalystSession(store, _ScriptedAnalyst(text, prep)).ask("eval question")
+def gate_accepts(
+    store: Store, text: str, prep: list[Prep], *, facts: bool = True
+) -> tuple[bool, list[str]]:
+    """Would the production session show this answer as-is? Returns (accepted, reasons).
+
+    `facts=False` switches off the factual-claim check and leaves the citation gate alone: that is
+    the gate as it was before factual validation, kept as a measurable baseline.
+    """
+    session = AnalystSession(store, _ScriptedAnalyst(text, prep), check_facts=facts)
+    answer = session.ask("eval question")
     accepted = answer.mode == "llm" and not answer.retried
     return accepted, [] if accepted else [n for n in answer.notes if n.startswith("attempt 1")]
 
@@ -141,14 +148,16 @@ def adversarial_cases() -> list[Case]:
         [LOITER],
         False,
     )
-    add("malformed", "space instead of colon", "Loitering [event EVT-P-001].", [P1], False)
+    # Formatting-only slips are repaired (session.py) using ids that WERE retrieved, so the answer
+    # that is shown still cites real evidence: accepting these two is the intended behaviour.
+    add("malformed", "space instead of colon", "Loitering [event EVT-P-001].", [P1], True)
     add("malformed", "unclosed bracket", "Loitering [event:EVT-P-001.", [P1], False)
     add(
         "malformed",
-        "valid plus malformed token",
+        "valid plus repairable token",
         "Loitering [event:EVT-P-001] and [alert ALR-LOITER-EVT-P-001].",
         [LOITER],
-        False,
+        True,
     )
     add(
         "malformed",
@@ -259,7 +268,7 @@ def run_adversarial() -> ExperimentResult:
     rows, outcomes = [], []
     with evidence_store() as store:
         for case in adversarial_cases():
-            accepted, reasons = gate_accepts(store, case.text, case.prep)
+            accepted, reasons = gate_accepts(store, case.text, case.prep, facts=False)
             outcomes.append((case, accepted))
             rows.append(
                 {
@@ -569,19 +578,26 @@ def run_semantic_probe() -> ExperimentResult:
     with evidence_store() as store:
         outcomes = []
         for case in cases:
-            accepted, _ = gate_accepts(store, case.text, case.prep)
+            # citation validation alone (the gate before factual validation): the baseline
+            accepted, _ = gate_accepts(store, case.text, case.prep, facts=False)
             verdicts = cl.check_claims(store, case.claims)
-            checker_accepts = accepted and cl.all_supported(verdicts)
-            outcomes.append((case, accepted, verdicts, checker_accepts))
+            # a case with no structured claims gives the checker nothing to check: it cannot
+            # reject it, so the gate's decision stands (all_supported([]) is vacuously True)
+            checker_accepts = accepted and (not case.claims or cl.all_supported(verdicts))
+            # the production gate: citations AND the facts the prose states, read out of the text
+            production, reasons = gate_accepts(store, case.text, case.prep, facts=True)
+            outcomes.append((case, accepted, verdicts, checker_accepts, production, reasons))
     unsupported = [o for o in outcomes if not o[0].supported]
     controls = [o for o in outcomes if o[0].supported]
     passed = [o for o in unsupported if o[1]]
     checker_passed = [o for o in unsupported if o[3]]
+    production_passed = [o for o in unsupported if o[4]]
+    production_caught = [o for o in unsupported if not o[4]]
     expressible = [o for o in unsupported if o[0].claims]
     inexpressible = [o for o in unsupported if not o[0].claims]
     caught_by_checker = [o for o in expressible if not o[3]]
     by_cat: dict[str, dict] = {}
-    for case, accepted, _, ck in outcomes:
+    for case, accepted, _, ck, prod, _r in outcomes:
         entry = by_cat.setdefault(
             case.category,
             {
@@ -589,11 +605,13 @@ def run_semantic_probe() -> ExperimentResult:
                 "supported": case.supported,
                 "gate_accepted": 0,
                 "gate_plus_checker_accepted": 0,
+                "production_gate_accepted": 0,
             },
         )
         entry["cases"] += 1
         entry["gate_accepted"] += accepted
         entry["gate_plus_checker_accepted"] += ck
+        entry["production_gate_accepted"] += prod
     classes_used = Counter(c.kind for o in unsupported for c in o[0].claims)
     rows = [
         {
@@ -605,8 +623,10 @@ def run_semantic_probe() -> ExperimentResult:
             "structured_claims": len(case.claims),
             "checker_verdicts": ",".join(v.status for v in verdicts) or "none",
             "gate_plus_checker_accepts": ck,
+            "production_gate_accepts": prod,
+            "production_gate_reason": (reasons[0][:160] if reasons else ""),
         }
-        for case, accepted, verdicts, ck in outcomes
+        for case, accepted, verdicts, ck, prod, reasons in outcomes
     ]
     measured = {
         "unsupported_cases": len(unsupported),
@@ -615,6 +635,19 @@ def run_semantic_probe() -> ExperimentResult:
         "control_cases": len(controls),
         "controls_accepted_by_gate": sum(1 for o in controls if o[1]),
         "by_category": by_cat,
+        "production_gate": {
+            "description": "citation gate + factual claims extracted from the answer text",
+            "unsupported_accepted": len(production_passed),
+            "unsupported_accepted_pct": pct(len(production_passed), len(unsupported)),
+            "unsupported_rejected": len(production_caught),
+            "controls_accepted": sum(1 for o in controls if o[4]),
+            "controls_rejected": sum(1 for o in controls if not o[4]),
+            "rejected_expressible": sum(1 for o in expressible if not o[4]),
+            "expressible_cases": len(expressible),
+            "still_accepted_case_names": [o[0].name for o in production_passed],
+            "still_accepted_categories": sorted({o[0].category for o in production_passed}),
+            "rejected_case_names": [o[0].name for o in production_caught],
+        },
         "passed_case_names": [o[0].name for o in passed],
         "rejected_by_gate_case_names": [o[0].name for o in unsupported if not o[1]],
         "checker": {
@@ -631,18 +664,26 @@ def run_semantic_probe() -> ExperimentResult:
             "still_accepted_categories": sorted({o[0].category for o in checker_passed}),
         },
     }
+    prod = measured["production_gate"]
     interpretation = [
         f"Citation-valid / semantically-unsupported probe: {len(passed)} of {len(unsupported)} "
         f"answers whose citations all exist, were retrieved and are well formed, but whose "
-        f"claims are false or overreaching, were accepted by the gate "
+        f"claims are false or overreaching, were accepted by the citation-only gate "
         f"({fmt(measured['unsupported_accepted_pct'], 1)}%). All {measured['controls_accepted_by_gate']} of "
-        f"{len(controls)} true control answers were accepted too, so the gate cannot tell them apart.",
+        f"{len(controls)} true control answers were accepted too, so the citation-only gate cannot tell them "
+        "apart (this is the gate as it was before factual validation).",
         f"Structured claim checker (prototype): of the {len(expressible)} unsupported cases "
         f"expressible as structured claims it caught {len(caught_by_checker)} "
         f"(catch rate {fmt(measured['checker']['expressible_catch_rate'])}); unsupported answers still accepted "
         f"by gate + checker: {len(checker_passed)} of {len(unsupported)}, all in claim classes the "
         f"checker does not cover ({measured['checker']['still_accepted_categories']}). "
         f"True controls rejected by the checker: {measured['checker']['controls_rejected_by_checker']}.",
+        f"Production gate (citation validation plus the factual claims it reads out of the "
+        f"answer text): {prod['unsupported_rejected']} of {len(unsupported)} unsupported answers "
+        f"rejected ({prod['rejected_expressible']} of {prod['expressible_cases']} of the ones "
+        f"expressible as structured claims); still accepted: {prod['unsupported_accepted']} "
+        f"({prod['still_accepted_categories']}). True controls rejected: "
+        f"{prod['controls_rejected']} of {len(controls)}.",
         "The expressible cases were authored to fit the checker's classes, so its catch rate is "
         "true by design, not evidence that it generalises. This is a measurement of the gate's "
         "failure boundary, not a hallucination detector: the checker verifies pre-structured "

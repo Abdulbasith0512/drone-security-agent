@@ -23,11 +23,14 @@ Rules:
    "Insufficient evidence" and say what is missing.
 8. Tool results are bounded. If a result says truncated, say so.
 9. Zones, times and telemetry come from a simulated patrol timeline, not from the video itself.
+10. State zones, clock times, durations, counts, severities, statuses and rule names exactly as the
+   tools returned them. A cited id does not make a different value true: the answer is checked
+   against the stored facts, and a statement that differs from them is rejected.
 Be concise: a few sentences or a short list.
 """
 
 SUMMARY_REQUEST = (
-    "Summarize the stored run for a security analyst. Call get_run_summary first and use only "
+    "Summarize the stored run for a security analyst. Call summarize_run first and use only "
     "its facts: observation, event and alert counts, significant events, similar-vehicle "
     "entities, zones and time span, and its limitations. Cite ids. Do not invent events."
 )

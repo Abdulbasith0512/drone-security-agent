@@ -14,7 +14,11 @@ The verifier has three levels, from cheapest to strictest:
 1. every cited id must exist and must have been retrieved this session (no invented evidence);
 2. the answer must cite something, and must not use identity/intent overclaim wording;
 3. (`sentence_level`, used for language-model answers) every FACTUAL sentence must carry its own
-   citation, so one valid citation cannot launder a paragraph of uncited claims.
+   citation, so one valid citation cannot launder a paragraph of uncited claims;
+4. (`fact_check`, used for language-model answers) the structured facts a sentence states (zone,
+   time, duration, severity, status, rule, activity, counts) must agree with the evidence it cites,
+   so a real citation cannot launder a false statement (see factcheck.py for exactly what is and
+   is not checked).
 
 `repair_citations` fixes only formatting slips (spacing, capitalisation, zero-padding of an id that
 was retrieved) before an answer is rejected; it never substitutes a different id.
@@ -22,9 +26,13 @@ was retrieved) before an answer is rejected; it never substitutes a different id
 
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from drone_agent.models import Zone
 from drone_agent.store import Store
+
+if TYPE_CHECKING:
+    from drone_agent.agent.factcheck import Finding
 
 CITATION_RE = re.compile(r"\[(frame|obs|event|entity|alert|tel):([A-Za-z0-9_.\-]+)\]")
 KNOWN_KINDS = ("frame", "obs", "event", "entity", "alert", "tel")
@@ -231,11 +239,16 @@ class CitationReport:
     overclaims: list[str] = field(default_factory=list)
     missing: bool = False  # evidence was available but the answer cites nothing
     uncited_claims: list[str] = field(default_factory=list)  # factual sentences with no citation
+    # structured facts the cited evidence contradicts or cannot support (fact_check only)
+    contradicted_facts: list["Finding"] = field(default_factory=list)
+    unsupported_facts: list["Finding"] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not (
-            self.invalid
+            self.contradicted_facts
+            or self.unsupported_facts
+            or self.invalid
             or self.not_retrieved
             or self.malformed
             or self.unknown_kinds
@@ -272,6 +285,16 @@ class CitationReport:
                 f" (+{len(self.uncited_claims) - 3} more)" if len(self.uncited_claims) > 3 else ""
             )
             out.append(f"factual sentences without their own citation: {shown}{more}")
+        if self.contradicted_facts:
+            out.append(
+                "statements contradicted by the stored evidence: "
+                + "; ".join(f.describe() for f in self.contradicted_facts[:3])
+            )
+        if self.unsupported_facts:
+            out.append(
+                "statements the cited evidence does not support: "
+                + "; ".join(f.describe() for f in self.unsupported_facts[:3])
+            )
         return out
 
 
@@ -282,6 +305,7 @@ def validate_answer(
     retrieved: set[str] | None = None,
     require_citation: bool = True,
     sentence_level: bool = False,
+    fact_check: bool = False,
 ) -> CitationReport:
     """Check an analyst answer.
 
@@ -289,6 +313,8 @@ def validate_answer(
     be in it. `require_citation` is False when no tool returned any evidence (the honest answer
     is then "insufficient evidence", which needs nothing to cite). `sentence_level` additionally
     requires each factual sentence to carry its own citation (used for model-written answers).
+    `fact_check` additionally compares the structured facts each sentence states (zones, times,
+    durations, severities, statuses, rules, activities, counts) with the evidence it cites.
     """
     citations = extract_citations(text)
     report = CitationReport(cited=citations)
@@ -304,4 +330,10 @@ def validate_answer(
     report.missing = require_citation and not citations
     if sentence_level:
         report.uncited_claims = find_uncited_claims(text)
+    if fact_check:
+        from drone_agent.agent.factcheck import check_facts  # factcheck builds on this module
+
+        facts = check_facts(store, text)
+        report.contradicted_facts = facts.contradicted
+        report.unsupported_facts = facts.unsupported
     return report

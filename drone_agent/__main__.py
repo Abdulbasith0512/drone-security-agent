@@ -873,6 +873,41 @@ def summarize_command(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def evaluate_command(args: argparse.Namespace, console: Console) -> int:
+    """Run the deterministic evaluation harness (no network, no API key) and write results."""
+    from drone_agent.eval.runner import run_all, write_results
+
+    try:
+        sizes = tuple(int(x) for x in args.scale_sizes.split(",") if x.strip())
+        if not sizes or any(n < 10 for n in sizes):
+            raise ValueError("--scale-sizes must be comma-separated integers >= 10")
+        results = run_all(args.scale, sizes, args.repeats)
+        paths = write_results(results, args.output)
+    except (ValueError, OSError) as exc:
+        _error(console, str(exc))
+        return 2
+    table = Table(title="Ablation table (every value computed by the harness)")
+    for col in ("Component", "Metric", "Baseline", "Ablated", "Effect"):
+        table.add_column(col)
+    for row in results["ablation_table"]:
+        table.add_row(
+            _cell(row["component"]),
+            _cell(row["metric"]),
+            _cell(f"{row['baseline']}  [{row['baseline_setting']}]"),
+            _cell(f"{row['ablated']}  [{row['ablated_setting']}]"),
+            _cell(row["effect"]),
+        )
+    console.print(table)
+    for exp in results["experiments"].values():
+        console.print(Text("\n" + exp["title"], style="bold"))
+        for line in exp["interpretation"]:
+            console.print(Text(f"  {line}"))
+    console.print(Text("\n" + " ".join(results["meta"]["qualifications"]), style="dim"))
+    for path in paths:
+        console.print(_cell(f"wrote {path}"))
+    return 0
+
+
 def make_demo_video_command(out_dir: str, console: Console) -> int:
     from drone_agent.video.synthetic import (
         DEMO_PROVIDER_LABEL,
@@ -1029,6 +1064,14 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
         an.add_argument("--offline", action="store_true", help="same as --provider offline")
         an.add_argument("--model", help="analyst model (default: ANALYST_MODEL from env/.env)")
 
+    ev = sub.add_parser(
+        "evaluate", help="run the deterministic evaluation/ablation harness (no API, no network)"
+    )
+    ev.add_argument("--output", default="output/eval", help="directory for results.json/csv")
+    ev.add_argument("--scale", action="store_true", help="also run the timing benchmark")
+    ev.add_argument("--scale-sizes", default="100,1000,10000", help="observation counts")
+    ev.add_argument("--repeats", type=int, default=5, help="timing repeats (median reported)")
+
     demo = sub.add_parser(
         "make-demo-video", help="write a tiny synthetic test video and a matching demo cassette"
     )
@@ -1058,6 +1101,8 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
         return ask_command(args, console)
     if args.command == "summarize":
         return summarize_command(args, console)
+    if args.command == "evaluate":
+        return evaluate_command(args, console)
     if args.command == "describe-frame":
         return describe_frame_command(args, console)
     return make_demo_video_command(args.out_dir, console)

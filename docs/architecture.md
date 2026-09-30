@@ -386,7 +386,9 @@ The LLM tool loop is bounded too (6 model rounds, 12 tool calls per answer).
 **Citation scheme.** `[frame:10] [obs:obs-10] [event:EVT-V-001] [entity:ENT-V-001] [alert:ALR-REPEAT-ENT-V-001]`: internal references into our own database only.
 **Validation** (after every LLM answer): (1) every cited id must exist in the database; (2) it must have been returned by a tool in this conversation (a real but
 never-retrieved id is rejected); (3) an answer that states facts must cite something, unless it says "Insufficient evidence"; (4) malformed tokens such as
-`[event EVT-1]` are rejected; (5) identity/intent wording ("the same person", "burglar", "criminal", "confirmed to be the same vehicle"; negated forms are allowed) is rejected.
+`[event EVT-1]` and tokens of an UNKNOWN type such as `[evt:EVT-1]` or `[source:x]` are rejected (unknown citation syntax is never ignored; ordinary brackets like `[12:30]` are not affected); (5) identity/intent wording ("the same person", "burglar", "criminal",
+"confirmed to be the same vehicle") is rejected unless a negation cue ("not", "no", "cannot", "never", "without", "n't") stands in the same clause within 8 words before it ("It cannot be said that this is the same individual" passes;
+"There is no doubt this is the same person" and "not different, this is the same person" do not). Negation is recognised syntactically only; double negatives are not understood.
 If validation fails the model gets ONE correction turn naming the problems; if the second answer also fails, the deterministic template answer is returned instead
 (mode `fallback`, with the reasons in `notes`). An unavailable model (auth, quota, network) degrades to the same fallback. Only validated or template text is ever shown.
 
@@ -405,6 +407,12 @@ under the same citation gate. A follow-up ("What objects were observed?") is ans
 **Known limitations.** The citation gate proves ids exist and were retrieved, NOT that the sentence around a citation is true: a model can cite a real id for a wrong claim. A live answer used the phrase "vehicle tracking" (the system does coarse attribute grouping, not tracking) and passed the gate; semantic entailment between claims and cited evidence is not verified and is an M7 evaluation target. The
 overclaim check is a narrow phrase list, not semantic. The template analyst is brittle outside its patterns. The analyst model can be wrong, slow or rate-limited; the fallback
 covers outages, not subtle misstatements. Evidence quality is bounded by the vision model (M5B) and by simulated telemetry.
+
+## Evaluation harness (M7, `drone_agent/eval/`)
+An evaluation-only package: it imports the production pipeline, rules and analyst gate but nothing in production imports it, and it makes no network or API call. `runner.run_all` executes the experiments
+(`gate_exp`, `pipeline_exp` for compression/flicker/entity memory, `rules_exp`, `grounding_exp` for the citation suite and the semantic-faithfulness probe, optional `scale`), derives the ablation table from
+their results, and writes `results.json`, `results.csv`, `ablation_table.csv` and `summary.md`. `claims.py` is a prototype structured claim-evidence checker that lives ONLY in the evaluation layer. Ablations are done
+inside the harness (`entities=[]`, a different `max_missed_frames`, gate threshold 0) so production behaviour is untouched. See docs/evaluation.md for definitions, results and threats to validity.
 
 ## Known false positives and false negatives
 False positives: a delivery driver waiting at the gate for 5+ minutes is "loitering"; authorised night staff trigger

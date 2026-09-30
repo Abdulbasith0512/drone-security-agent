@@ -15,8 +15,13 @@ from dataclasses import dataclass, field
 from drone_agent.store import Store
 
 CITATION_RE = re.compile(r"\[(frame|obs|event|entity|alert):([A-Za-z0-9_.\-]+)\]")
+KNOWN_KINDS = ("frame", "obs", "event", "entity", "alert")
 # Loose detector for things that look like citations but are malformed (e.g. "[event EVT-1]").
 _MALFORMED_RE = re.compile(r"\[(?:frame|obs|event|entity|alert)\b[^\]]*\]", re.IGNORECASE)
+# Citation-shaped tokens of an UNRECOGNISED type: "[evt:EVT-1]", "[source:wikipedia]",
+# "[Event:EVT-1]" (kinds are lower-case). They are never ignored: an answer containing one fails.
+# Ordinary brackets without a "word:" prefix ("[1]", "[12:30]") are not affected.
+_UNKNOWN_KIND_RE = re.compile(r"\[\s*([A-Za-z][A-Za-z_\-]*)\s*:[^\[\]]*\]")
 
 # Wording an analyst answer must not contain (identity / intent overclaims). A match preceded by a
 # negation ("not the same person") is allowed.
@@ -26,9 +31,13 @@ _OVERCLAIMS = re.compile(
     r"criminal(?:ly)?|burglar\w*|thie(?:f|ves)|committing a crime|intent to (?:steal|rob|harm))\b",
     re.IGNORECASE,
 )
-_NEGATION_BEFORE = re.compile(
-    r"(not|never|no|n't|cannot|without)\s+(?:\w+\s+){0,2}$", re.IGNORECASE
-)
+# Negation is recognised narrowly and syntactically, never semantically: a negation cue must sit in
+# the same clause (no . ; : ! ? , or "but"/"however" in between) at most this many words before the
+# phrase, and the words in between must not include "doubt" (so "no doubt this is the same person"
+# is still rejected). Double negatives such as "I do not doubt ..." are not understood: a limit.
+_NEGATION_WINDOW_WORDS = 8
+_CLAUSE_BREAK = re.compile(r"[.;:!?,\n]|\b(?:but|however)\b", re.IGNORECASE)
+_NEGATION_WORDS = frozenset({"not", "never", "no", "cannot", "without"})
 
 
 @dataclass(frozen=True)
@@ -62,12 +71,27 @@ def citation_exists(store: Store, citation: Citation) -> bool:
     return store.get_alert(ref) is not None
 
 
+def _negated(text: str, start: int) -> bool:
+    """Is the phrase starting at `start` preceded, in its own clause, by a negation cue?"""
+    clause = _CLAUSE_BREAK.split(text[:start])[-1]
+    words = clause.split()
+    for i in range(len(words) - 1, -1, -1):
+        word = re.sub(r"[^\w']", "", words[i].lower())
+        if word in _NEGATION_WORDS or word.endswith("n't"):
+            between = words[i + 1 :]
+            return len(between) <= _NEGATION_WINDOW_WORDS and not any(
+                "doubt" in w.lower() for w in between
+            )
+    return False
+
+
+def find_unknown_kinds(text: str) -> list[str]:
+    """Citation-shaped tokens whose type is not one of KNOWN_KINDS, in order of appearance."""
+    return [m.group(0) for m in _UNKNOWN_KIND_RE.finditer(text) if m.group(1) not in KNOWN_KINDS]
+
+
 def find_overclaims(text: str) -> list[str]:
-    found = []
-    for m in _OVERCLAIMS.finditer(text):
-        if not _NEGATION_BEFORE.search(text[max(0, m.start() - 30) : m.start()]):
-            found.append(m.group(0))
-    return found
+    return [m.group(0) for m in _OVERCLAIMS.finditer(text) if not _negated(text, m.start())]
 
 
 @dataclass
@@ -76,13 +100,19 @@ class CitationReport:
     invalid: list[Citation] = field(default_factory=list)  # not in the database
     not_retrieved: list[Citation] = field(default_factory=list)  # exists, but no tool returned it
     malformed: list[str] = field(default_factory=list)
+    unknown_kinds: list[str] = field(default_factory=list)  # e.g. "[evt:EVT-1]", "[source:x]"
     overclaims: list[str] = field(default_factory=list)
     missing: bool = False  # evidence was available but the answer cites nothing
 
     @property
     def ok(self) -> bool:
         return not (
-            self.invalid or self.not_retrieved or self.malformed or self.overclaims or self.missing
+            self.invalid
+            or self.not_retrieved
+            or self.malformed
+            or self.unknown_kinds
+            or self.overclaims
+            or self.missing
         )
 
     def problems(self) -> list[str]:
@@ -96,6 +126,13 @@ class CitationReport:
             )
         if self.malformed:
             out.append("malformed citation tokens: " + ", ".join(self.malformed))
+        if self.unknown_kinds:
+            out.append(
+                "unknown citation type (allowed: "
+                + ", ".join(KNOWN_KINDS)
+                + "): "
+                + ", ".join(self.unknown_kinds)
+            )
         if self.overclaims:
             out.append("identity/intent wording is not allowed: " + ", ".join(self.overclaims))
         if self.missing:
@@ -125,6 +162,7 @@ def validate_answer(
             report.not_retrieved.append(c)
     well_formed = {m.group(0) for m in CITATION_RE.finditer(text)}
     report.malformed = [m for m in _MALFORMED_RE.findall(text) if m not in well_formed]
+    report.unknown_kinds = find_unknown_kinds(text)
     report.overclaims = find_overclaims(text)
     report.missing = require_citation and not citations
     return report

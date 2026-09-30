@@ -3,13 +3,14 @@
 Prototype for the FlytBase AI Engineer assignment: a docked-drone security analyst that turns video and
 telemetry into events, deterministic alerts, searchable history and grounded Q&A.
 
-> **Status: M6 (analyst Q&A and summary over stored evidence).** Scripted scenarios run end to end through alerts; real video runs through sampling, a frame-change gate and cassette replay. **Gemini is available as an optional real vision model (M5B)**; Evidence-grounded Q&A and run summaries (offline template analyst, optional Gemini via LangChain) are in M6.
+> **Status: M7 (evaluation, ablation and grounding-faithfulness harness).** Scripted scenarios run end to end through alerts; real video runs through sampling, a frame-change gate and cassette replay. **Gemini is available as an optional real vision model (M5B)**; Evidence-grounded Q&A and run summaries (offline template analyst, optional Gemini via LangChain) are in M6.
 
 Design in one line: `FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING`.
 
 ## Contents
 - [docs/feature_spec.md](docs/feature_spec.md): value, requirements, assumptions, non-goals
 - [docs/architecture.md](docs/architecture.md): pipeline and design
+- [docs/evaluation.md](docs/evaluation.md): experiments, ablations, metrics, threats to validity
 - [docs/ai_usage.md](docs/ai_usage.md): how AI tools were used, and what I changed or rejected
 
 ## Setup (Python 3.11+)
@@ -75,6 +76,15 @@ uses a LangChain tool-calling loop over read-only tools, and its answer is shown
 The analyst model is `ANALYST_MODEL` (separate from the vision `GEMINI_MODEL`). The LLM only explains: alerts, severities, events and entities come from the deterministic rules. See docs/architecture.md ("Analyst layer").
 
 `ingest` twice into one database is rejected and changes nothing (use a new `--db`); `build-events` and `analyze` replace their derived data (idempotent).
+
+## Evaluation (M7)
+```
+python -m drone_agent evaluate --output output/eval                       # deterministic, offline, no key
+python -m drone_agent evaluate --output output/eval --scale               # + timing benchmark (100/1k/10k observations)
+```
+Runs the frame-gate ablation, temporal compression, flicker-tolerance and entity-memory ablations (with negative controls), a labelled rule matrix, a citation-gate adversarial suite, a
+citation-valid / semantically-unsupported probe with a prototype structured claim checker, and an optional scale benchmark. Writes `results.json`, `results.csv`, `ablation_table.csv` and `summary.md`
+under `output/eval/` (gitignored). Every number comes from executable code. Results, setup, metrics and threats to validity are in [docs/evaluation.md](docs/evaluation.md); the rule metrics apply only to the controlled synthetic fixtures.
 
 ## Design decisions
 _TBD (M8). See docs/architecture.md._

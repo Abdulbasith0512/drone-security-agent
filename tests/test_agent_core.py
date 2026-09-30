@@ -516,3 +516,85 @@ def test_offline_analyst_reports_which_template_answered(tools):
     assert analyst.answer("What happened at the driveway?").matched == "zone"
     assert analyst.answer("Summarize").matched == "summary"
     assert analyst.answer("gibberish zzz qqq").matched == "insufficient"
+
+
+# ---- validator fixes found by the M7 adversarial suite --------------------------------------
+@pytest.mark.parametrize(
+    "token",
+    [
+        "[evt:EVT-P-002]",
+        "[source:wikipedia]",
+        "[Event:EVT-P-001]",
+        "[ev-ent:EVT-P-001]",
+        "[ref: 12]",
+    ],
+)
+def test_unknown_citation_types_fail_validation_instead_of_being_ignored(store, token):
+    text = f"Loitering [event:EVT-P-001] and {token}."
+    report = validate_answer(store, text, retrieved={"event:EVT-P-001"})
+    assert report.unknown_kinds == [token] and not report.ok
+    unknown_problem = next(p for p in report.problems() if p.startswith("unknown citation type"))
+    assert "allowed: frame, obs, event, entity, alert" in unknown_problem
+    assert [c.token for c in report.cited] == ["[event:EVT-P-001]"]  # the valid one still counts
+
+
+def test_only_unknown_typed_tokens_also_fail_and_recognised_or_plain_brackets_do_not(store):
+    assert not validate_answer(store, "See [evt:EVT-P-001].").ok
+    fine = "Seen at [12:30] in zone [1] [event:EVT-P-001]."
+    assert validate_answer(store, fine, retrieved={"event:EVT-P-001"}).ok
+    from drone_agent.agent.citations import find_unknown_kinds
+
+    assert find_unknown_kinds("[event:EVT-P-001] [frame:3]") == []
+    assert find_unknown_kinds("[evt:A] and [source:b]") == ["[evt:A]", "[source:b]"]
+
+
+def test_an_answer_with_an_unknown_citation_type_is_retried_then_falls_back(store):
+    llm = ScriptedLLM(
+        lambda t: (t.get_event("EVT-P-001"), "Loitering [event:EVT-P-001] [evt:EVT-P-002].")[1],
+        "Loitering [event:EVT-P-001] [evt:EVT-P-002].",
+    )
+    answer = AnalystSession(store, llm).ask("Why was the loitering alert raised?")
+    assert answer.mode == "fallback" and answer.retried and len(llm.calls) == 2
+    assert "unknown citation type" in llm.calls[1]["corr"][1]
+    assert "[evt:" not in answer.text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "It cannot be said that this is the same individual.",
+        "The evidence does not establish that these are the same person.",
+        "These observations do not confirm the same person.",
+        "These are not the same person.",
+        "We can't tell whether it is the same individual.",
+        "No evidence shows the same person appears twice, and no criminal activity is claimed.",
+    ],
+)
+def test_clearly_negated_identity_statements_are_not_rejected(text):
+    assert find_overclaims(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "This is the same person.",
+        "The same individual appears in both events.",
+        "The person was identified as the same individual.",
+        "There is no doubt this is the same person.",
+        "These are not different people, this is the same person.",
+        "Not sure, but this is the same person.",
+        "He is a burglar.",
+        "Criminal intent is likely.",
+    ],
+)
+def test_affirmative_identity_and_intent_claims_are_still_rejected(text):
+    assert find_overclaims(text) != []
+
+
+def test_negation_is_syntactic_and_bounded():
+    far = (
+        "It cannot be said, after reviewing all of the stored events, that this is the same person."
+    )
+    assert find_overclaims(far) != []  # a clause break between cue and phrase: not negated
+    too_far = "Not one of the many events listed here can be shown to be the same person."
+    assert find_overclaims(too_far) != []  # cue more than 8 words before the phrase

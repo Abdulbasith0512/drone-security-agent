@@ -305,3 +305,28 @@ Citation validation verifies that cited ids exist, that they were actually retri
 It does NOT prove semantic entailment between each natural-language claim and the evidence it cites. Observed live example: the model wrote "vehicle tracking", although the system does not perform
 persistent vehicle tracking; it performs coarse attribute-based vehicle grouping. Wording inside a list item can also be less carefully qualified than the surrounding uncertainty statement
 (e.g. "a blue pickup" without "similar"). I deliberately did not add a one-off phrase ban for "vehicle tracking": that would be brittle and would hide the general issue. M7 should measure it.
+
+## M7: Evaluation, ablation and grounding-faithfulness harness
+**Tool:** Claude Code (Claude Sonnet 5.5), from my M7 spec. NOT committed at the time of writing; no live API call was made.
+
+**What the AI generated:** the `drone_agent/eval/` package (generated frame-gate fixture, pipeline and rule experiments, citation adversarial suite, semantic-faithfulness probe, eval-only structured claim checker,
+scale benchmark, runner with an ablation table and JSON/CSV/Markdown output), the `evaluate` command, `docs/evaluation.md` and offline tests (31 for the harness plus 22 regression test cases for the two validator fixes; 509 in total).
+
+**Design decisions the AI made (please review)**
+- Ablations live in the harness (`entities=[]`, other `max_missed_frames`, gate threshold 0) so production code is unchanged. The one production-side change is a ruff per-file ignore for long prose strings in `eval/`.
+- The gate fixture has exact ground truth and includes two illumination-only steps and two small objects on purpose, to show pixel change is not semantic importance. Thresholds were picked from the observed score distribution; the 6.0 default was not tuned.
+- The citation suite runs the real `AnalystSession` with a scripted LLM boundary, so it measures the actual gate. Rule cells are count based (TP/FP/FN per alert, one TN per empty cell) and zero denominators print N/A.
+- The semantic probe answers are authored from the evidence model, so its pass percentage characterises a failure boundary rather than estimating a rate. The claim checker only accepts structured claims; I did not attempt free-text extraction.
+
+**Results I did not expect or did not like (kept, not tuned)**
+- At the default threshold the gate missed the small and the medium object appearances and accepted both illumination-only steps.
+- The citation gate got two of its 29 adversarial decisions wrong on the first run: an unknown citation kind (`[evt:...]`) was invisible, and a negation further than two words before "the same individual" was rejected. After review I fixed exactly these two validator behaviours (unknown citation-shaped tokens now fail; negation is recognised within the same clause up to 8 words before the phrase, with a `doubt` exception) and re-ran the whole evaluation without touching fixtures or methodology. The suite's accuracy is therefore no longer independent evidence, because the validator was corrected against the same cases.
+- Every one of the authored citation-valid but unsupported answers passed the gate together with the true controls; the checker fixes only the classes it was built for.
+- Entity linking is clearly superlinear at 50,000 observations (probably the per-comparison recomputation of a group's last-seen time). I did not change the linker.
+
+**Problems found and fixed during validation (honest log)**
+- A mutation run (8 mutations of the harness, all caught except one that turned out to be a no-op mutation) left stale bytecode: a restored file had the same size and mtime second as the mutated one, so Python imported the mutated `.pyc` and the CLI failed with a KeyError. Clearing `__pycache__` fixed it; I re-ran the whole suite afterwards.
+- Two of my patch scripts wrote real newlines into string literals (shell escaping); I fixed them by editing the files directly.
+
+**How it was tested:** determinism (two full runs compared), metric math and zero denominators, gate mechanics, flicker sweep boundary, entity ablation and controls, rule matrix consistency, adversarial categories and internal consistency, probe well-formedness (every citation exists, is retrieved and well formed),
+claim checker verdicts, generated observations, scale smoke run and exponent math, JSON/CSV serialization, the CLI, no-network and no-key operation, and the import boundary.

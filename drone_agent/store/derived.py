@@ -92,7 +92,8 @@ class DerivedMixin:
 
     _EVENT_COLUMNS = (
         "event_id, object_type, zone, first_seen, first_seen_utc, last_seen, last_seen_utc,"
-        " attributes_json, activities_json, description, close_reason, status, confidence"
+        " attributes_json, activities_json, description, close_reason, status, confidence,"
+        " departure_observed_at"
     )
 
     @staticmethod
@@ -112,11 +113,12 @@ class DerivedMixin:
             _OPEN_PLACEHOLDER if opened else ev.close_reason.value,
             "open" if opened else "closed",
             ev.confidence,
+            ev.departure_observed_at.isoformat() if ev.departure_observed_at else None,
         )
 
     def _insert_event(self, ev: Event) -> None:
         self._conn.execute(
-            f"INSERT INTO events ({self._EVENT_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT INTO events ({self._EVENT_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             self._event_row(ev),
         )
         self._conn.executemany(
@@ -174,7 +176,7 @@ class DerivedMixin:
                 try:
                     self._conn.execute(
                         f"INSERT INTO events ({self._EVENT_COLUMNS})"
-                        f" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                        f" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                         f" ON CONFLICT(event_id) DO UPDATE SET {updates}",
                         self._event_row(ev),
                     )
@@ -413,6 +415,11 @@ class DerivedMixin:
                     ),
                     "entity_id": r["entity_id"],
                     "confidence": r["confidence"],
+                    "departure_observed_at": (
+                        datetime.fromisoformat(r["departure_observed_at"])
+                        if r["departure_observed_at"]
+                        else None
+                    ),
                 }
             )
             for r in rows

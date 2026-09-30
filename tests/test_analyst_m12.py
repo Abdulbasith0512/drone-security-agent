@@ -218,7 +218,7 @@ def test_listings_are_compact_and_the_detail_lives_in_get_alert(store):
     assert not {"ladder", "history", "rule_facts", "recommended_action"} & set(listed)
     full = tools.get_alert("ALR-LOITER-EVT-P-001")["alert"]
     assert [s["severity"] for s in full["ladder"]] == ["medium", "critical"]
-    assert full["history"] and full["recommended_action"] and full["status"] == "resolved"
+    assert full["history"] and full["recommended_action"] and full["status"] == "escalated"
 
 
 # ---- the scripted planner drives the real tool-calling loop ---------------------------------
@@ -394,8 +394,11 @@ def test_a_safety_alert_answer_shows_status_action_and_the_drones_state(offline)
 def test_alert_status_questions_filter_by_lifecycle(offline):
     unresolved = offline.answer("Which alerts are still open?").text
     assert "unresolved alert(s)" in unresolved and "/resolved" not in unresolved
+    # the loitering alert is still open: the drone flew on without seeing the gate empty
+    assert "ALR-LOITER-EVT-P-001" in unresolved
     resolved = offline.answer("Which alerts were resolved?").text
-    assert "/open" not in resolved and "ALR-LOITER-EVT-P-001" in resolved
+    assert "/open" not in resolved and "ALR-SIGNAL" in resolved
+    assert "ALR-LOITER-EVT-P-001" not in resolved
     critical = offline.answer("show critical alerts").text
     assert "ALR-LOITER-EVT-P-001" in critical and "ALR-AFTERHOURS" not in critical
 

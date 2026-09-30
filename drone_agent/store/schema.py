@@ -9,6 +9,8 @@ Version 2 (M3): events, event_observations, entities, entity_events (derived dat
 Version 3 (M4): alerts, alert_events (derived from events/entities by the rule engine).
 Version 4 (M9): streaming runs and the alert lifecycle: telemetry signal, observation provenance,
 open events, entity match scores, alert status/history/telemetry evidence, scenarios, agent_runs.
+Version 5 (M13): indexes for bounded read paths.
+Version 6: events.departure_observed_at (observed departure, distinct from why coverage ended).
 Migrations only ever ADD objects, so an older database keeps all of its data when upgraded.
 """
 
@@ -266,6 +268,13 @@ _V5: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_alerts_entity ON alerts(entity_id)",
 )
 
+_V6: tuple[str, ...] = (
+    # When the drone saw the event's zone WITHOUT the object (the evidence that it left). NULL for
+    # every event stored before this column existed and whenever departure was not observed: old
+    # rows are NOT reinterpreted as confirmed departures, re-run `build-events` to fill it in.
+    "ALTER TABLE events ADD COLUMN departure_observed_at TEXT",
+)
+
 # target schema version -> statements that bring a (version - 1) database up to it
-MIGRATIONS: dict[int, tuple[str, ...]] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5}
+MIGRATIONS: dict[int, tuple[str, ...]] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6}
 SCHEMA_VERSION = max(MIGRATIONS)

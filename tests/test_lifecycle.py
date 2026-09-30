@@ -21,7 +21,8 @@ from drone_agent.rules.config import LoiteringRule
 T0 = datetime(2026, 9, 29, 12, 0, tzinfo=IST)
 
 
-def event(seconds: int, reason=CloseReason.OPEN, frames=None) -> Event:
+def event(seconds: int, reason=CloseReason.OPEN, frames=None, departed_at=None) -> Event:
+    """`departed_at`: seconds after T0 at which the drone first saw the zone without the person."""
     frames = frames or list(range(1, seconds // 60 + 2))
     return Event(
         event_id="EVT-P-001",
@@ -34,11 +35,12 @@ def event(seconds: int, reason=CloseReason.OPEN, frames=None) -> Event:
         frame_ids=frames,
         close_reason=reason,
         confidence=0.9,
+        departure_observed_at=None if departed_at is None else T0 + timedelta(seconds=departed_at),
     )
 
 
-def snapshot(seconds: int, reason=CloseReason.OPEN) -> Alert:
-    (alert,) = RuleEngine().run([event(seconds, reason)], [])
+def snapshot(seconds: int, reason=CloseReason.OPEN, departed_at=None) -> Alert:
+    (alert,) = RuleEngine().run([event(seconds, reason, departed_at=departed_at)], [])
     return alert
 
 
@@ -76,9 +78,18 @@ def test_live_alert_is_raised_escalated_and_resolved_as_time_passes():
     assert (step.at, step.effective_at) == (t(305), t(300))  # recorded 5 s after it was true
     assert "Dispatch security" in alert.recommended_action  # the action follows the severity
 
-    (resolved,) = manager.reconcile([snapshot(400, CloseReason.GAP)], t(520))
+    # the camera moving on (zone change) is not a departure: the alert stays as it was
+    (moved_on,) = manager.reconcile([snapshot(400, CloseReason.ZONE_CHANGE)], t(460))
+    assert moved_on.transitions == [] and moved_on.alert.status is AlertStatus.ESCALATED
+    assert moved_on.alert.resolved_at is None
+
+    # the drone kept looking at the gate and first saw it empty at +460 s: that is the departure
+    (resolved,) = manager.reconcile(
+        [snapshot(400, CloseReason.MISSED_FRAMES, departed_at=460)], t(520)
+    )
     assert resolved.alert.status is AlertStatus.RESOLVED
-    assert resolved.alert.resolved_at == t(400) and resolved.alert.history[-1].at == t(520)
+    assert resolved.alert.resolved_at == t(460) and resolved.alert.history[-1].at == t(520)
+    assert resolved.alert.history[-1].effective_at == t(460)
     assert kinds(resolved.alert) == [
         TransitionKind.RAISED,
         TransitionKind.ESCALATED,
@@ -106,7 +117,7 @@ def test_sampling_that_jumps_over_the_warning_still_records_both_rungs():
 
 # ---- batch and streaming end in the same state -----------------------------------------------
 def test_batch_and_streaming_agree_on_everything_except_when_things_were_recorded():
-    final = snapshot(480, CloseReason.GAP)
+    final = snapshot(480, CloseReason.MISSED_FRAMES, departed_at=540)
     batch = AlertManager()
     batch.reconcile([final], t(480), live=False)
 
@@ -117,7 +128,7 @@ def test_batch_and_streaming_agree_on_everything_except_when_things_were_recorde
         (310, CloseReason.OPEN),
     ):
         live.reconcile(RuleEngine().run([event(seconds, reason)], []), t(seconds + 3))
-    live.reconcile([final], t(500))
+    live.reconcile([final], t(600))
 
     (b,), (v,) = batch.alerts, live.alerts
     fields = {
@@ -127,7 +138,7 @@ def test_batch_and_streaming_agree_on_everything_except_when_things_were_recorde
     }  # fmt: skip
     assert b.model_dump(include=fields) == v.model_dump(include=fields)
     assert kinds(b) == kinds(v)
-    assert [h.at for h in b.history] == [t(120), t(300), t(480)]  # batch: when it became true
+    assert [h.at for h in b.history] == [t(120), t(300), t(540)]  # batch: when it became true
     assert v.detected_at > b.detected_at  # streaming: when it was noticed
 
 

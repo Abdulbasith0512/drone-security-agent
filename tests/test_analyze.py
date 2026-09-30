@@ -42,7 +42,7 @@ def test_security_events_gate_person_loiters(store):
     assert alert.frame_ids == [1, 2, 3, 4, 6, 7, 8, 9]  # the tolerated frame 5 did not matter
 
 
-def test_security_events_loitering_alert_escalates_then_resolves_when_the_person_leaves(store):
+def test_security_events_loitering_alert_escalates_and_stays_open_when_the_camera_moves_on(store):
     prepared(SECURITY, store)
     (alert,) = store.query_alerts(rule_id="loitering")
     assert alert.severity is Severity.CRITICAL  # 480 s passed the 300 s critical rung
@@ -54,9 +54,10 @@ def test_security_events_loitering_alert_escalates_then_resolves_when_the_person
     assert [t.kind for t in alert.history] == [
         TransitionKind.RAISED,
         TransitionKind.ESCALATED,
-        TransitionKind.RESOLVED,
     ]
-    assert alert.status is AlertStatus.RESOLVED  # the person was seen leaving (event closed)
+    # The event ended because the drone flew on to the driveway, not because the drone saw the
+    # gate empty, so there is no evidence the person left: the alert stays open (escalated).
+    assert alert.status is AlertStatus.ESCALATED and alert.resolved_at is None
     assert alert.confidence is not None and 0.9 <= alert.confidence <= 0.95
     assert alert.recommended_action and "Dispatch security" in alert.recommended_action
 

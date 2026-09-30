@@ -51,7 +51,7 @@ def big(big_db):
 
 # ---- the migration ----------------------------------------------------------------------------
 def test_schema_v5_adds_only_indexes():
-    assert schema_module.SCHEMA_VERSION == 5
+    assert schema_module.SCHEMA_VERSION >= 5
     assert all(stmt.startswith("CREATE INDEX") for stmt in schema_module.MIGRATIONS[5])
 
 
@@ -69,6 +69,7 @@ def test_a_v4_database_is_migrated_and_keeps_its_data(security_db, tmp_path):
         "idx_alerts_entity",
     ):
         conn.execute(f"DROP INDEX {name}")
+    conn.execute("ALTER TABLE events DROP COLUMN departure_observed_at")  # added by schema v6
     conn.execute("PRAGMA user_version = 4")
     conn.commit()
     conn.close()
@@ -76,7 +77,8 @@ def test_a_v4_database_is_migrated_and_keeps_its_data(security_db, tmp_path):
         assert migrated.migrated_from == 4 and migrated.count_alerts() == 7
         names = {r["name"] for r in migrated._conn.execute("PRAGMA index_list(events)")}
         assert "idx_events_first" in names
-        assert migrated._conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        version = migrated._conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == schema_module.SCHEMA_VERSION
 
 
 # ---- events -----------------------------------------------------------------------------------

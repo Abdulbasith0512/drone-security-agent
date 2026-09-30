@@ -2,7 +2,8 @@
 # The ground truth below was written from this story BEFORE the system was run against it:
 #   - the person is first seen at +60 s and last seen at +480 s (one 420 s event, frame 9 is empty)
 #   - loitering WARNS after 120 s (+180 s = 23:58:00) and the same alert turns CRITICAL after
-#     300 s (+360 s = 00:01:00); the drone then moves on, so the alert resolves
+#     300 s (+360 s = 00:01:00); the drone then moves on after ONE empty
+#     gate frame, which is coverage ending, not proof the person left, so the alert stays escalated
 #   - after-hours presence (closed 22:00-06:00) fires at the first sighting and stays open until an
 #     operator deals with it; nothing else may fire
 # All coordinates are synthetic. Frames are 60 s apart.
@@ -39,8 +40,8 @@ expect:
       zone: main_gate
       steps: [{severity: medium, at_s: 180}, {severity: critical, at_s: 360}]
       detect_within_s: 60
-      final_status: resolved
-      note: "warns at 120 s of loitering, escalates at 300 s, resolves when the drone leaves the gate"
+      final_status: escalated
+      note: "warns at 120 s of loitering, escalates at 300 s; the drone flies on after one empty frame (within the missed-frame tolerance), so departure is not confirmed and the alert is not resolved"
     - rule_id: after_hours_presence
       zone: main_gate
       steps: [{severity: medium, at_s: 60}]

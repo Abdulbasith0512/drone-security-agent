@@ -8,16 +8,18 @@ from drone_agent.models.base import DomainModel, ObjectType, Zone
 
 
 class CloseReason(StrEnum):
-    GAP = "gap"  # no matching detection within max_gap_seconds
+    """Why an event stopped being extended: the end of OBSERVATION COVERAGE, not of the object.
+
+    Whether the object actually left is a separate question, answered only by
+    `Event.departure_observed_at`: the drone kept looking at the same zone and the object was not
+    there. A gap, a zone change and the end of the input say nothing about it.
+    """
+
+    GAP = "gap"  # no observation of the zone for longer than max_gap_seconds
     MISSED_FRAMES = "missed_frames"  # too many consecutive frames in the zone without a match
     ZONE_CHANGE = "zone_change"  # the drone observed a different zone
     SCENARIO_END = "scenario_end"  # input ended while the event was still open
     OPEN = "open"  # streaming snapshot: the event is still being extended
-
-    @property
-    def object_departed(self) -> bool:
-        """Was the object actually no longer seen (as opposed to the input just ending)?"""
-        return self in (CloseReason.GAP, CloseReason.MISSED_FRAMES, CloseReason.ZONE_CHANGE)
 
 
 class Event(DomainModel):
@@ -40,6 +42,14 @@ class Event(DomainModel):
     # Mean detection confidence over the detections merged into this event. Providers that report
     # none contribute the documented placeholder, so this is not a calibrated probability.
     confidence: float | None = Field(default=None, ge=0, le=1)
+    # When the drone first saw the same zone WITHOUT the object, in the run of empty frames that
+    # closed the event (only `missed_frames` closures set it). This is the only evidence of
+    # departure; None means departure was not observed (coverage ended or the event is open).
+    departure_observed_at: AwareDatetime | None = None
+
+    @property
+    def departure_confirmed(self) -> bool:
+        return self.departure_observed_at is not None
 
     @property
     def duration_seconds(self) -> float:
@@ -58,6 +68,8 @@ class Event(DomainModel):
     def _consistent(self) -> "Event":
         if self.last_seen < self.first_seen:
             raise ValueError("last_seen must not be before first_seen")
+        if self.departure_observed_at is not None and self.departure_observed_at < self.last_seen:
+            raise ValueError("departure_observed_at must not be before last_seen")
         if len(self.frame_ids) != len(self.observation_ids):
             raise ValueError("frame_ids and observation_ids must have the same length")
         return self

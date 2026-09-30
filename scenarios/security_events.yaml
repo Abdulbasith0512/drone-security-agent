@@ -209,7 +209,7 @@ expect:
       zone: main_gate
       steps: [{severity: medium, at_s: 180}, {severity: critical, at_s: 360}]
       detect_within_s: 60
-      final_status: resolved
+      final_status: escalated  # the drone flew to the driveway: no observed departure, so not resolved
     - rule_id: after_hours_presence
       zone: main_gate
       steps: [{severity: medium, at_s: 60}]

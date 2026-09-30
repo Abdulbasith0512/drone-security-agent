@@ -38,7 +38,14 @@ class ContextUpdate:
 
 
 def _fingerprint(ev: Event) -> tuple:
-    return (ev.last_seen, ev.close_reason, len(ev.observation_ids), ev.entity_id, ev.confidence)
+    return (
+        ev.last_seen,
+        ev.close_reason,
+        ev.departure_observed_at,
+        len(ev.observation_ids),
+        ev.entity_id,
+        ev.confidence,
+    )
 
 
 class ContextEngine:

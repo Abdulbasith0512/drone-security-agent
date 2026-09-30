@@ -28,7 +28,10 @@ def evaluate(events: Iterable[Event], cfg: LoiteringRule) -> list[Alert]:
 
     Uses the event's duration (last_seen - first_seen), never a frame count, so a tolerated
     missed detection inside the event does not matter. Boundary: duration >= threshold fires.
-    An event whose object was seen leaving (not merely the end of the input) resolves the alert.
+    The alert resolves only when the object was SEEN to be gone (`departure_observed_at`: the drone
+    kept looking at the same zone and the person was not there), and it resolves at that moment.
+    A zone change, a gap in observations or the end of the input end the observation coverage, not
+    the loitering, so the alert stays open (an operator can still resolve it).
     """
     if not cfg.enabled:
         return []
@@ -72,7 +75,7 @@ def evaluate(events: Iterable[Event], cfg: LoiteringRule) -> list[Alert]:
         )
         if escalated:
             message += f" It passed the {critical_after:.0f}s critical threshold and was escalated."
-        departed = ev.close_reason.object_departed
+        departed_at = ev.departure_observed_at
         facts: dict = {
             "zone": ev.zone.value,
             "object_type": ev.object_type.value,
@@ -97,8 +100,8 @@ def evaluate(events: Iterable[Event], cfg: LoiteringRule) -> list[Alert]:
                 event_ids=[ev.event_id],
                 frame_ids=frame_union([ev]),
                 facts=facts,
-                status=AlertStatus.RESOLVED if departed else AlertStatus.OPEN,
-                resolved_at=ev.last_seen if departed else None,
+                status=AlertStatus.RESOLVED if departed_at else AlertStatus.OPEN,
+                resolved_at=departed_at,
                 confidence=event_confidence([ev]),
                 verdict=verdict_for(severity),
                 recommended_action=recommended_action(RULE_ID, severity, override),

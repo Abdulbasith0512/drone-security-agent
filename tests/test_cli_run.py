@@ -141,8 +141,11 @@ def test_illegal_operator_actions_exit_with_a_clear_message(tmp_path):
     run_cli("alert-action", "--db", db, "ALR-RESTRICTED-EVT-P-003", "acknowledge")
     code, text = run_cli("alert-action", "--db", db, "ALR-RESTRICTED-EVT-P-003", "acknowledge")
     assert code == 1 and "already acknowledged" in text
+    # the drone flew on without seeing the gate empty, so the loitering alert is still open: an
+    # operator resolves it, and after that it can no longer be acknowledged
+    assert run_cli("alert-action", "--db", db, "ALR-LOITER-EVT-P-001", "resolve")[0] == 0
     code, text = run_cli("alert-action", "--db", db, "ALR-LOITER-EVT-P-001", "acknowledge")
-    assert code == 1 and "already resolved" in text  # the person left: it resolved itself
+    assert code == 1 and "already resolved" in text
     with pytest.raises(SystemExit) as exc:  # argparse rejects a time without a UTC offset
         run_cli("alert-action", "--db", db, "ALR-X", "resolve", "--at", "2026-09-30T00:00")
     assert exc.value.code == 2

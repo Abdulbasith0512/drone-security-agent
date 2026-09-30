@@ -411,9 +411,14 @@ def test_rule_models_reject_direct_misuse():
 
 
 # ---- escalation ladder, triage fields and lifecycle inputs (M9) --------------------------------
-def gate_event(seconds: int, reason=CloseReason.GAP) -> Event:
-    return make_event(seconds=seconds).model_copy(
-        update={"close_reason": reason, "confidence": 0.92}
+def gate_event(seconds: int, reason=CloseReason.GAP, departed_after: int | None = None) -> Event:
+    """`departed_after`: seconds after last_seen at which the zone was first seen without it."""
+    event = make_event(seconds=seconds)
+    departed = (
+        None if departed_after is None else event.last_seen + timedelta(seconds=departed_after)
+    )
+    return event.model_copy(
+        update={"close_reason": reason, "confidence": 0.92, "departure_observed_at": departed}
     )
 
 
@@ -436,13 +441,24 @@ def test_default_loitering_ladder_warns_at_120s_and_escalates_at_300s():
     assert crit.ladder[1].at == crit.first_seen + timedelta(seconds=300)
 
 
-def test_loitering_alert_resolves_only_when_the_object_was_seen_leaving():
-    for reason in (CloseReason.GAP, CloseReason.MISSED_FRAMES, CloseReason.ZONE_CHANGE):
+def test_loitering_alert_resolves_only_when_the_object_was_seen_to_be_gone():
+    # the observation coverage ended, which says nothing about whether the person left
+    for reason in (
+        CloseReason.GAP,
+        CloseReason.ZONE_CHANGE,
+        CloseReason.SCENARIO_END,
+        CloseReason.OPEN,
+        CloseReason.MISSED_FRAMES,  # without a recorded departure (for example an older database)
+    ):
         (alert,) = loitering.evaluate([gate_event(200, reason)], LoiteringRule())
-        assert alert.status.value == "resolved" and alert.resolved_at == alert.last_seen
-    for reason in (CloseReason.SCENARIO_END, CloseReason.OPEN):
-        (alert,) = loitering.evaluate([gate_event(200, reason)], LoiteringRule())
-        assert alert.status.value == "open" and alert.resolved_at is None
+        assert alert.status.value == "open" and alert.resolved_at is None, reason
+    # the drone kept looking at the same zone and the person was not there: resolved at that moment
+    event = gate_event(200, CloseReason.MISSED_FRAMES, departed_after=60)
+    (alert,) = loitering.evaluate([event], LoiteringRule())
+    assert alert.status.value == "resolved"
+    assert (
+        alert.resolved_at == event.last_seen + timedelta(seconds=60) == event.departure_observed_at
+    )
 
 
 def test_alerts_carry_confidence_verdict_and_a_recommended_action():

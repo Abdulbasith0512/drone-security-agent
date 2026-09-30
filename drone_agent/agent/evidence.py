@@ -106,7 +106,9 @@ def event_view(ev: Event, limits: ToolLimits, detail: bool = True) -> dict:
     if detail:
         view["description"] = clip(ev.description, limits.max_description)
         view["frame_refs"] = [ref("frame", f) for f in frames]
-        view["close_reason"] = ev.close_reason.value
+        view["close_reason"] = ev.close_reason.value  # why observation of it stopped
+        if ev.departure_observed_at is not None:  # only set when the zone was seen without it
+            view["departure_observed_at"] = ev.departure_observed_at.isoformat()
         view["confidence"] = ev.confidence
     return view
 

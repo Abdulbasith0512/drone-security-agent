@@ -14,6 +14,10 @@ Algorithm (per observation, in chronological order):
 3. Every open event in this observation's zone that was NOT matched has missed a frame; more than
    max_missed_frames consecutive misses close it                -> MISSED_FRAMES
 Events still open when the input ends are closed by `flush()`     -> SCENARIO_END
+
+A close reason says observation COVERAGE ended. Only MISSED_FRAMES also records that the object
+was seen to be gone (`departure_observed_at`: the first empty frame of the run that closed the
+event); a zone change, a gap or the end of the input never does.
 """
 
 from collections.abc import Iterable
@@ -46,6 +50,7 @@ class _OpenEvent:
     raw: dict[str, dict[str, int]] = field(default_factory=dict)  # key -> raw value -> count
     norm: dict[str, dict[str, int]] = field(default_factory=dict)  # key -> normalised -> count
     missed: int = 0
+    first_missed_at: datetime | None = None  # first frame of the current run of misses
     confidence_sum: float = 0.0
     detections: int = 0
 
@@ -64,6 +69,7 @@ class _OpenEvent:
             self.norm.setdefault(key, {})
             self.norm[key][n] = self.norm[key].get(n, 0) + 1
         self.missed = 0
+        self.first_missed_at = None
 
     def compatible(self, det: DetectedObject, cfg: EventConfig) -> bool:
         for key in cfg.aggregation.stable_attributes.get(self.object_type, []):
@@ -88,6 +94,9 @@ class _OpenEvent:
             close_reason=reason,
             confidence=(
                 round(self.confidence_sum / self.detections, 4) if self.detections else None
+            ),
+            departure_observed_at=(
+                self.first_missed_at if reason is CloseReason.MISSED_FRAMES else None
             ),
         )
 
@@ -147,6 +156,8 @@ class EventAggregator:
         for ev in self._open:
             if ev.event_id not in matched:
                 ev.missed += 1
+                if ev.missed == 1:
+                    ev.first_missed_at = obs.timestamp
                 if ev.missed > cfg.max_missed_frames:
                     closed.append(ev.to_event(CloseReason.MISSED_FRAMES))
                     continue

@@ -42,6 +42,8 @@ _STOP = frozenset(
 _COLORS = frozenset(
     _WORDS.findall("blue red white black green yellow silver grey gray orange brown dark")
 )
+_PEOPLE = re.compile(r"\b(people|persons?|pedestrians?|humans?)\b")
+DETAIL_ENTITIES = 3  # vehicle entities answered with their full appearance history
 _VEHICLE = re.compile(r"\b(vehicle|pickup|truck|car|van|suv|lorry|bike|motorcycle)s?\b")
 _ID = re.compile(r"\b(ALR-[A-Z]+-[A-Z0-9-]+|EVT-[PVO]-\d+|ENT-V-\d+)\b", re.IGNORECASE)
 
@@ -60,6 +62,18 @@ def _t(iso: str) -> str:
 
 def _cites(refs: list[str]) -> str:
     return " ".join(f"[{r}]" for r in refs)
+
+
+def _not_shown(shown: int, total: int, noun: str) -> str | None:
+    """A visible note when a list was cut (None when everything is shown). Lists are always in
+    time order, so the omitted items are the latest ones."""
+    if shown >= total:
+        return None
+    return f"(showing {shown} of {total} {noun}, earliest first; {total - shown} not shown)"
+
+
+def _note_lines(*notes: str | None) -> list[str]:
+    return [n for n in notes if n]
 
 
 def _zone_in(q: str) -> str | None:
@@ -111,6 +125,9 @@ class OfflineAnalyst:
         if re.search(r"\balerts?\b", q):
             return self._alert_list()
         if _VEHICLE.search(q):
+            if _PEOPLE.search(q) and not set(re.findall(r"[a-z]+", q)) & _COLORS:
+                # people AND vehicles asked about in general: answer both, never just one
+                return self._zone(zone) if zone else self._objects(compound=True)
             return self._vehicle(q)
         if zone:
             return self._zone(zone)
@@ -247,6 +264,9 @@ class OfflineAnalyst:
         lines = [self._entity_lead(ent, res["appearances_total"])]
         for e in res["appearances"]:
             lines.append(f"- {_event_line(e)}")
+        lines += _note_lines(
+            _not_shown(len(res["appearances"]), res["appearances_total"], "appearances")
+        )
         for a in res["alerts"]:
             lines.append(f"Related alert: [{a['ref']}] {a['severity']}: {a['title']}.")
         return OfflineAnswer("\n".join(lines), ("entity", entity_id), "entity")
@@ -263,7 +283,8 @@ class OfflineAnalyst:
         )
 
     def _vehicle(self, q: str) -> OfflineAnswer:
-        entities = self.tools.list_entities()["entities"]
+        listing = self.tools.list_entities()
+        entities, total = listing["entities"], listing["total"]
         words = set(re.findall(r"[a-z]+", q))
         scored = []
         for ent in entities:
@@ -275,7 +296,7 @@ class OfflineAnalyst:
             return self._vehicle_events(q)
         many = bool(re.search(r"more than once|again|repeat|multiple|how many|several|times", q))
         lines = []
-        for ent in chosen[:3]:
+        for ent in chosen[:DETAIL_ENTITIES]:
             res = self.tools.get_entity_history(ent["ref"].split(":", 1)[1])
             count = res["appearances_total"]
             head = ""
@@ -286,6 +307,22 @@ class OfflineAnalyst:
             lines.extend(
                 f"Related alert: [{a['ref']}] {a['severity']}: {a['title']}." for a in res["alerts"]
             )
+        rest = chosen[DETAIL_ENTITIES:]
+        if rest:  # every matching entity stays visible: full history for a few, a line for the rest
+            lines.append(
+                f"(showing full history for {DETAIL_ENTITIES} of {len(chosen)} similar-vehicle "
+                f"entities; {len(rest)} more are listed briefly below)"
+            )
+            for ent in rest:
+                lines.append(
+                    f"- [{ent['ref']}] {ent['label']}, {ent['appearance_count']} appearance(s) "
+                    f"{_cites(ent['event_refs'])}"
+                )
+        note = _not_shown(len(entities), total, "similar-vehicle entities")
+        if note:
+            lines.append(note)
+            if best > 0 or words & _COLORS:  # the search itself only saw the listed entities
+                lines.append("(the search covered only the entities listed by the tool)")
         return OfflineAnswer(
             "\n".join(lines), ("entity", chosen[0]["ref"].split(":", 1)[1]), "vehicle"
         )
@@ -299,6 +336,7 @@ class OfflineAnalyst:
             )
         lines = ["No similar-vehicle entity matches the description. Vehicle events stored:"]
         lines.extend(f"- {_event_line(e)}" for e in res["events"])
+        lines += _note_lines(_not_shown(len(res["events"]), res["total"], "vehicle events"))
         return OfflineAnswer("\n".join(lines), None, "vehicle-events")
 
     def _zone(self, zone: str) -> OfflineAnswer:
@@ -311,20 +349,24 @@ class OfflineAnalyst:
             )
         lines = [f"In {zone}: {obs['total']} stored observation(s) and {events['total']} event(s)."]
         lines.extend(f"- {_event_line(e)}" for e in events["events"])
+        lines += _note_lines(_not_shown(len(events["events"]), events["total"], "events"))
         for a in alerts["alerts"]:
             lines.append(
                 f"Alert [{a['ref']}] {a['severity']}: {a['title']} (rule '{a['rule_id']}') "
                 f"{_cites(a['event_refs'])}"
             )
+        lines += _note_lines(_not_shown(len(alerts["alerts"]), alerts["total"], "alerts"))
         for o in obs["observations"]:
             lines.append(f"Observation [{o['ref']}] [{o['frame_ref']}]: {o['description']}")
+        if obs["truncated"]:  # the observation lines are a sample, not the full list
+            lines.append(f"(showing {obs['returned']} of {obs['total']} observations as a sample)")
         return OfflineAnswer("\n".join(lines), ("zone", zone), "zone")
 
     # -- run level --------------------------------------------------------------------------
     def _summary(self) -> OfflineAnswer:
         return OfflineAnswer(render_summary(self.tools.get_run_summary()), None, "summary")
 
-    def _objects(self) -> OfflineAnswer:
+    def _objects(self, compound: bool = False) -> OfflineAnswer:
         facts = self.tools.get_run_summary()
         if not facts["counts"]["observations"]:
             return OfflineAnswer(
@@ -338,6 +380,14 @@ class OfflineAnalyst:
         carried = sum(n for s, n in facts["sources"].items() if s.endswith("+carried"))
         if carried:
             lines.append(f"Counts include {carried} carried-forward (repeated) observation(s).")
+        if compound:  # people AND vehicles: state both categories explicitly, from full totals
+            by_type = []
+            for kind in ("person", "vehicle", "other"):
+                total = self.tools.list_events(object_type=kind)["total"]
+                if total:
+                    by_type.append(f"{kind} {total}")
+            if by_type:
+                lines.append("Events by type: " + ", ".join(by_type) + ".")
         for e in facts["events"]:
             attrs = ", ".join(f"{k}={v}" for k, v in e["attributes"].items())
             lines.append(
@@ -345,8 +395,12 @@ class OfflineAnalyst:
                 + (f" ({attrs})" if attrs else "")
                 + f" in {e['zone']}, {_t(e['first_seen'])}"
             )
+        lines += _note_lines(_not_shown(len(facts["events"]), facts["events_total"], "events"))
         for ent in facts["entities"]:
             lines.append(f"- similar-vehicle memory [{ent['ref']}]: {ent['label']} (coarse match)")
+        lines += _note_lines(
+            _not_shown(len(facts["entities"]), facts["entities_total"], "similar-vehicle entities")
+        )
         return OfflineAnswer("\n".join(lines), None, "objects")
 
     # -- follow-ups and fallback ------------------------------------------------------------

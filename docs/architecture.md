@@ -394,7 +394,7 @@ If validation fails the model gets ONE correction turn naming the problems; if t
 
 **Template (offline) analyst.** Pattern-matched, not language understanding: alerts (by rule or id), events, entities, zone summaries, blue-pickup style vehicle questions,
 after-hours people, objects, run summary and a labelled keyword search; everything else gets "Insufficient evidence" plus the list of supported questions. Output is labelled
-"template answer (deterministic, no LLM)". Vehicle wording is always "similar ... coarse attribute match; not confirmed to be the same vehicle".
+"template answer (deterministic, no LLM)". Vehicle wording is always "similar ... coarse attribute match; not confirmed to be the same vehicle". **Truncation is never silent (M8a):** whenever a list is cut (tool caps of 20 events or entities, 3 sampled observations, the 3 vehicle entities that get a full history) the answer says "showing N of M ..., earliest first; K not shown" or "full history for 3 of M ... the other entities are listed briefly"; nothing is added when nothing was cut. A question naming both people and vehicles (without a specific colour or type) is answered with both categories (counts, events by type, entities) instead of vehicles only. The LLM path already receives `total/returned/truncated` from every tool.
 
 **Sessions and follow-ups.** `AnalystSession` keeps the last 6 question/answer pairs in memory (no persistence, no multi-user state) and passes them to the LLM. For the template
 analyst a follow-up such as "Where was it seen?" resolves only when the previous answer named exactly ONE entity/alert/event; several candidates leave the pronoun unresolved

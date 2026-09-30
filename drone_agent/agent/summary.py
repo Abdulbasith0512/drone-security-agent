@@ -147,6 +147,12 @@ def render_summary(facts: dict) -> str:
             f"separate appearance(s) {events}. This is a coarse attribute match, not confirmed "
             "to be the same vehicle."
         )
+    if facts["entities_total"] > len(facts["entities"]):
+        shown, total = len(facts["entities"]), facts["entities_total"]
+        lines.append(
+            f"  (showing {shown} of {total} vehicle entities, earliest first; "
+            f"{total - shown} not shown)"
+        )
     lines.append("Limitations: " + " ".join(facts["limitations"]))
     return "\n".join(lines)
 

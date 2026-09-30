@@ -330,3 +330,18 @@ scale benchmark, runner with an ablation table and JSON/CSV/Markdown output), th
 
 **How it was tested:** determinism (two full runs compared), metric math and zero denominators, gate mechanics, flicker sweep boundary, entity ablation and controls, rule matrix consistency, adversarial categories and internal consistency, probe well-formedness (every citation exists, is retrieved and well formed),
 claim checker verdicts, generated observations, scale smoke run and exponent math, JSON/CSV serialization, the CLI, no-network and no-key operation, and the import boundary.
+
+## M8a: Explicit truncation in the offline analyst
+**Tool:** Claude Code (Claude Sonnet 5.5), from my M8a spec, after the first real-video (Gemini) run exposed silent omissions.
+
+**What the AI changed:** `agent/offline.py` and `agent/summary.py` only. Every capped list now states what was cut (`showing N of M ..., earliest first; K not shown`), vehicle answers show full history for 3 entities and list the rest briefly, zone answers disclose that observations are a 3-item sample, and a general people-and-vehicles question is answered with both categories. Event aggregation, entity linking, rules, the VLM pipeline and the M7 evaluation are untouched.
+
+**Process:** tests first (29 new tests; 13 failed before the change for exactly the expected reasons: missing notices and compound questions routed to vehicles only), plus 14 byte-for-byte golden answers recorded from the unchanged baseline for non-truncated questions, so unchanged answers are proven unchanged. Fixtures are generated (no video, no API).
+
+**Results:** all M8a tests, the full suite and ruff pass; the M7 evaluation re-run is identical to the frozen baseline in every functional experiment and the ablation table (only timings vary). On the real-clip analysis copy the answers now say "showing 20 of 25 events, earliest first; 5 not shown", "full history for 3 of 11 similar-vehicle entities; 8 more are listed briefly", and report both people and vehicles.
+
+**Honest notes**
+- Design choice: a completeness note is shown only when something was cut, so small answers are unchanged.
+- The vehicle search still only sees the first 20 entities the tool returns; the answer now says so instead of hiding it. Paging the tool is not implemented.
+- I found that opening ANY database with `Store.open` rewrites its file bytes even for read-only questions (schema initialisation). My three demo questions therefore changed the bytes of `output/real/clip_analysis.db`; I verified its tables are logically identical to a fresh rebuild from the untouched `clip.db`, and the video, cassette and `clip.db` are byte-identical. This existing M2 behaviour is not changed here.
+- The citation gate still cannot detect omission; the notes are what protects the reader.

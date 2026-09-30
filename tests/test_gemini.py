@@ -30,7 +30,7 @@ from drone_agent.vision.gemini import (
     response_schema,
 )
 
-SECRET = "AIzaSyFAKE-not-a-real-key-1234567890"
+SECRET = "TEST-PLACEHOLDER-NOT-A-REAL-KEY-0001"
 GOOD = json.dumps(
     {
         "description": "A blue pickup truck is parked by the gate.",

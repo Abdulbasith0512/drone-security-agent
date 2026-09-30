@@ -24,7 +24,7 @@ from drone_agent.scenario import load_scenario
 from drone_agent.simulate import run_scenario
 from drone_agent.store import Store
 
-SECRET = "AIzaSyFAKE-analyst-key-0987654321"
+SECRET = "TEST-PLACEHOLDER-NOT-A-REAL-KEY-0002"
 
 
 @pytest.fixture(scope="module")

@@ -6,6 +6,7 @@ import yaml
 from pydantic import AwareDatetime, Field, ValidationError, model_validator
 
 from drone_agent.clock import SimulationClock
+from drone_agent.expectations import Expectations
 from drone_agent.models import DetectedObject, DomainModel, Zone
 from drone_agent.telemetry import TelemetryConfig
 
@@ -28,6 +29,8 @@ class Scenario(DomainModel):
     start: AwareDatetime
     telemetry: TelemetryConfig
     frames: list[ScenarioFrame] = Field(min_length=1)
+    # Optional ground truth used by the evaluation (see drone_agent/expectations.py).
+    expect: Expectations | None = None
 
     @property
     def clock(self) -> SimulationClock:

@@ -17,7 +17,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from drone_agent.models import DomainModel
+from drone_agent.models import DomainModel, Provenance
 from drone_agent.vision.base import FrameInput
 from drone_agent.vision.contract import FrameDescriber, ProviderOutput, ProviderOutputError
 
@@ -111,6 +111,10 @@ class Cassette:
         return len(self._by_key)
 
 
+# A cassette whose provider label starts with this holds CANNED demo text, not model output.
+CANNED_PROVIDER_PREFIX = "synthetic-demo"
+
+
 class CassetteMode(StrEnum):
     REPLAY = "replay"
     RECORD = "record"
@@ -137,6 +141,7 @@ class CassetteDescriber:
         self.recorded = 0
         self.live_calls = 0
         self.content_mismatches: list[str] = []
+        self.last_provenance: Provenance | None = None  # how the most recent answer was obtained
 
     @property
     def name(self) -> str:
@@ -156,12 +161,18 @@ class CassetteDescriber:
 
     def describe(self, frame: FrameInput) -> ProviderOutput:
         if self.mode is CassetteMode.LIVE:
+            self.last_provenance = Provenance.LIVE
             return self._call_inner(frame)
         if frame.frame_key is None or frame.content_hash is None:
             raise ValueError("cassette lookup needs frame.frame_key and frame.content_hash")
         entry = self.cassette.lookup(frame.frame_key)
         if entry is not None:
             self.replayed += 1
+            self.last_provenance = (
+                Provenance.CANNED
+                if self.cassette.data.provider.startswith(CANNED_PROVIDER_PREFIX)
+                else Provenance.REPLAYED
+            )
             if entry.content_hash != frame.content_hash:
                 self.content_mismatches.append(frame.frame_key)  # advisory: decoder differences
             return entry.output
@@ -171,6 +182,7 @@ class CassetteDescriber:
                 "re-record the cassette or sample the frames it contains"
             )
         output = self._call_inner(frame, count_live=False)
+        self.last_provenance = Provenance.LIVE  # recorded just now from a real call
         self.cassette.add(
             CassetteEntry(
                 key=frame.frame_key,

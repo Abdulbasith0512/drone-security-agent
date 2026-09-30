@@ -16,10 +16,15 @@ import numpy as np
 from drone_agent.models import ObjectType
 from drone_agent.video.sampling import SamplingConfig, sample_frames
 from drone_agent.video.source import VideoError, VideoMetadata, VideoSource
-from drone_agent.vision.cassette import Cassette, CassetteEntry, CassetteVideo
+from drone_agent.vision.cassette import (
+    CANNED_PROVIDER_PREFIX,
+    Cassette,
+    CassetteEntry,
+    CassetteVideo,
+)
 from drone_agent.vision.contract import ProviderObject, ProviderOutput
 
-DEMO_PROVIDER_LABEL = "synthetic-demo (canned descriptions, not a vision model)"
+DEMO_PROVIDER_LABEL = f"{CANNED_PROVIDER_PREFIX} (canned descriptions, not a vision model)"
 
 
 @dataclass(frozen=True)

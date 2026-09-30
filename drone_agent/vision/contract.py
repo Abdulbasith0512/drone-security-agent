@@ -12,9 +12,9 @@ import math
 import re
 from typing import Protocol, runtime_checkable
 
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
 
-from drone_agent.models import DetectedObject, DomainModel, ObjectType, Observation
+from drone_agent.models import DetectedObject, DomainModel, ObjectType, Observation, Provenance
 from drone_agent.vision.base import FrameInput
 
 CONTRACT_VERSION = "1"
@@ -41,11 +41,28 @@ class ProviderOutputError(ValueError):
 
 
 class ProviderObject(DomainModel):
+    """One object a model reports. In lenient mode (validation context `lenient_types`) a class
+    outside person/vehicle/other is kept as `other` with the reported word in the
+    `reported_class` attribute instead of failing the whole frame; strict mode rejects it."""
+
     type: ObjectType
     activity: str | None = Field(default=None, min_length=1, max_length=100)
     attributes: dict[str, str] = Field(default_factory=dict, max_length=10)
     # None = the provider does not report confidence (see default_confidence in DescriberProvider).
     confidence: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_unknown_class(cls, data: object, info: ValidationInfo) -> object:
+        context = info.context or {}
+        if not (context.get("lenient_types") and isinstance(data, dict)):
+            return data
+        reported = data.get("type")
+        if isinstance(reported, str) and reported not in {t.value for t in ObjectType}:
+            attributes = dict(data.get("attributes") or {})
+            attributes["reported_class"] = reported.strip()[:100] or "unknown"
+            return {**data, "type": ObjectType.OTHER.value, "attributes": attributes}
+        return data
 
     @field_validator("attributes")
     @classmethod
@@ -77,11 +94,13 @@ def provider_output_schema() -> dict:
     return ProviderOutput.model_json_schema()
 
 
-def parse_provider_output(raw: str | dict) -> ProviderOutput:
+def parse_provider_output(raw: str | dict, *, lenient_types: bool = False) -> ProviderOutput:
     """Validate provider output (a JSON string or an already-parsed dict).
 
     Policy: the only normalisation is removing ONE surrounding markdown code fence. Nothing else is
-    repaired or guessed; missing fields are errors, never filled in. Raises ProviderOutputError.
+    repaired or guessed; missing fields are errors, never filled in. The single opt-in exception is
+    `lenient_types`: an unknown object class becomes `other` (the reported word is kept), so one
+    odd label does not discard a frame. Raises ProviderOutputError.
     """
     data = raw
     if isinstance(raw, str):
@@ -96,7 +115,7 @@ def parse_provider_output(raw: str | dict) -> ProviderOutput:
     if not isinstance(data, dict):
         raise ProviderOutputError("provider output must be a JSON object")
     try:
-        return ProviderOutput.model_validate(data)
+        return ProviderOutput.model_validate(data, context={"lenient_types": lenient_types})
     except ValidationError as exc:
         problems = "; ".join(
             f"{'.'.join(str(p) for p in e['loc']) or 'output'}: {e['msg']}" for e in exc.errors()
@@ -120,6 +139,7 @@ def observation_from_output(
     output: ProviderOutput,
     source: str,
     default_confidence: float | None = None,
+    provenance: Provenance | None = None,
 ) -> Observation:
     """Build the pipeline's Observation from a provider's output.
 
@@ -156,6 +176,7 @@ def observation_from_output(
         zone=frame.zone,
         description=output.description,
         detected_objects=objects,
+        provenance=provenance,
     )
 
 
@@ -172,4 +193,11 @@ class DescriberProvider:
 
     def analyze(self, frame: FrameInput) -> Observation:
         output = self.describer.describe(frame)
-        return observation_from_output(frame, output, self.name, self.default_confidence)
+        # A describer says how it produced THIS answer (a cassette: replayed or canned; a model:
+        # live). Anything that does not say leaves provenance unknown rather than guessing.
+        provenance = getattr(self.describer, "last_provenance", None) or getattr(
+            self.describer, "provenance", None
+        )
+        return observation_from_output(
+            frame, output, self.name, self.default_confidence, provenance
+        )

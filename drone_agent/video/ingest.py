@@ -120,6 +120,7 @@ def run_video_ingest(
                 zone=zone,
                 description=last.description,
                 detected_objects=last.detected_objects,
+                provenance=last.provenance,
             )
             action = "carried"
         else:

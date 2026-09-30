@@ -26,6 +26,7 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
+from drone_agent.models import Provenance
 from drone_agent.vision.base import FrameInput
 from drone_agent.vision.contract import (
     PROVIDER_INSTRUCTIONS,
@@ -158,14 +159,19 @@ class GeminiDescriber:
     """FrameDescriber backed by the Gemini API. One `describe` = one frame = one API request
     (plus bounded retries)."""
 
+    provenance = Provenance.LIVE  # every answer comes from a live call made now
+
     def __init__(
         self,
         config: GeminiConfig,
         client: Any | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        lenient_types: bool = False,
     ) -> None:
         self.config = config
         self.name = f"gemini:{config.model}"
+        # An unknown object class becomes "other" instead of failing the frame (opt-in).
+        self.lenient_types = lenient_types
         self.sleep = sleep
         self.client = client or genai.Client(
             api_key=config.api_key,
@@ -205,7 +211,7 @@ class GeminiDescriber:
             try:
                 if not text or not text.strip():
                     raise ProviderOutputError("model returned no text (blocked or empty response)")
-                return parse_provider_output(text)
+                return parse_provider_output(text, lenient_types=self.lenient_types)
             except ProviderOutputError as exc:
                 if malformed_left <= 0:
                     raise GeminiOutputError(self._scrub(str(exc))) from None

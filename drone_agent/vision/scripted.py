@@ -1,6 +1,6 @@
 """ScriptedProvider: scripted scenario frames -> validated Observations. No network, no API key."""
 
-from drone_agent.models import Observation
+from drone_agent.models import Observation, Provenance
 from drone_agent.scenario import Scenario, ScenarioFrame
 from drone_agent.vision.base import FrameInput
 
@@ -34,4 +34,5 @@ class ScriptedProvider:
             zone=scripted.zone,
             description=scripted.description,
             detected_objects=scripted.objects,
+            provenance=Provenance.SCRIPTED,
         )

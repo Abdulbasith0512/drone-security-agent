@@ -11,6 +11,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from drone_agent import cli_run
 from drone_agent.agent.build import build_gemini_analyst
 from drone_agent.agent.config import AnalystConfig, AnalystConfigError
 from drone_agent.agent.session import AnalystSession, Answer
@@ -1077,8 +1078,12 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
     )
     demo.add_argument("--out-dir", default="output/demo")
 
+    cli_run.add_parsers(sub)
+
     args = parser.parse_args(argv)
     console = console or Console()
+    if args.command in cli_run.COMMANDS:
+        return cli_run.dispatch(args, console)
     if args.command == "simulate":
         return simulate_command(args.scenario, console)
     if args.command == "ingest":

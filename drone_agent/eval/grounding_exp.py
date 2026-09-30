@@ -367,10 +367,10 @@ def probes() -> list[Probe]:
     add(
         "control_true",
         "correct severity",
-        "The loitering alert is medium severity [alert:ALR-LOITER-EVT-P-001].",
+        "The loitering alert is critical severity [alert:ALR-LOITER-EVT-P-001].",
         [LOITER],
         True,
-        C("alert_severity", "ALR-LOITER-EVT-P-001", "medium"),
+        C("alert_severity", "ALR-LOITER-EVT-P-001", "critical"),
     )
     add(
         "control_true",

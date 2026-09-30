@@ -198,7 +198,7 @@ def test_scripted_pipeline_still_produces_the_m4_facts(tmp_path):
         built = build_events(s)
         analysis = analyze(s)
     assert (built.events, built.entities, built.multi_appearance_entities) == (7, 2, 1)
-    assert analysis.alerts == 6 and built.detections == 20
+    assert analysis.alerts == 7 and built.detections == 20  # 6 rules alerts + the link loss
     with Store.open(tmp_path / "day.db") as s:
         ingest_result(s, run_scenario(load_scenario(SCENARIO_DIR / "normal_day.yaml")))
         build_events(s)

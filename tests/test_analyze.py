@@ -7,9 +7,10 @@ from rich.console import Console
 
 from drone_agent.__main__ import main
 from drone_agent.ingest import ingest_result
-from drone_agent.models import ObjectType, Severity, Zone
+from drone_agent.models import AlertStatus, ObjectType, Severity, TransitionKind, Zone
 from drone_agent.pipeline import build_events
-from drone_agent.rules import RuleEngine, analyze, load_rules_config
+from drone_agent.rules import AlertManager, RuleEngine, analyze, load_rules_config
+from drone_agent.rules.analyze import data_end
 from drone_agent.scenario import load_scenario
 from drone_agent.simulate import run_scenario
 from drone_agent.store import Store, StoreError
@@ -36,9 +37,28 @@ def test_security_events_gate_person_loiters(store):
     (alert,) = store.query_alerts(rule_id="loitering")
     (event,) = [store.get_event(e) for e in alert.event_ids]
     assert (event.object_type, event.zone) == (ObjectType.PERSON, Zone.MAIN_GATE)
-    assert alert.facts["duration_seconds"] == 480 and alert.facts["threshold_seconds"] == 300
-    assert alert.facts["zone"] == "main_gate"
+    assert alert.facts["duration_seconds"] == 480 and alert.facts["threshold_seconds"] == 120
+    assert alert.facts["critical_after_seconds"] == 300 and alert.facts["zone"] == "main_gate"
     assert alert.frame_ids == [1, 2, 3, 4, 6, 7, 8, 9]  # the tolerated frame 5 did not matter
+
+
+def test_security_events_loitering_alert_escalates_then_resolves_when_the_person_leaves(store):
+    prepared(SECURITY, store)
+    (alert,) = store.query_alerts(rule_id="loitering")
+    assert alert.severity is Severity.CRITICAL  # 480 s passed the 300 s critical rung
+    assert [(s.label, s.severity) for s in alert.ladder] == [
+        ("warning", Severity.MEDIUM),
+        ("critical", Severity.CRITICAL),
+    ]
+    assert (alert.triggered_at - alert.first_seen).total_seconds() == 120
+    assert [t.kind for t in alert.history] == [
+        TransitionKind.RAISED,
+        TransitionKind.ESCALATED,
+        TransitionKind.RESOLVED,
+    ]
+    assert alert.status is AlertStatus.RESOLVED  # the person was seen leaving (event closed)
+    assert alert.confidence is not None and 0.9 <= alert.confidence <= 0.95
+    assert alert.recommended_action and "Dispatch security" in alert.recommended_action
 
 
 def test_security_events_blue_pickup_entity_triggers_repeat_vehicle_with_careful_wording(store):
@@ -86,9 +106,10 @@ def test_security_events_overlap_policy_and_actual_totals(store):
         "loitering": 1,
         "repeat_vehicle": 1,
         "restricted_zone_entry": 1,
+        "signal_loss": 1,  # the scenario's 140 s telemetry dropout is a real link loss
     }
-    assert summary.alerts == 6 and (summary.events_analyzed, summary.entities_analyzed) == (7, 2)
-    assert summary.by_severity == {"high": 1, "low": 1, "medium": 4}
+    assert summary.alerts == 7 and (summary.events_analyzed, summary.entities_analyzed) == (7, 2)
+    assert summary.by_severity == {"critical": 1, "high": 2, "low": 1, "medium": 3}
     # a night-time loiterer and a restricted-zone intruder each have TWO alerts (different risks)
     per_event: dict[str, list[str]] = {}
     for alert in store.query_alerts():
@@ -109,7 +130,13 @@ def test_normal_day_produces_no_alerts(store):
 # ---- persistence, idempotency, integrity ----------------------------------------------------
 def test_alerts_round_trip_through_sqlite_exactly(store):
     prepared(SECURITY, store)
-    expected = RuleEngine().run(store.query_events(), store.list_entities())
+    now = data_end(store)
+    snapshots = RuleEngine().run(
+        store.query_events(), store.list_entities(), store.list_telemetry(), now=now
+    )
+    manager = AlertManager()
+    manager.reconcile(snapshots, now, live=False)
+    expected = manager.alerts
     assert store.query_alerts() == expected
     assert store.get_alert(expected[0].alert_id) == expected[0]
     assert store.get_alert("ALR-NOPE") is None
@@ -128,6 +155,7 @@ def test_alert_ids_are_deterministic_across_databases(tmp_path):
         "ALR-AFTERHOURS-EVT-P-001",
         "ALR-LOITER-EVT-P-001",
         "ALR-REPEAT-ENT-V-001",
+        "ALR-SIGNAL-20260929T183630Z",  # no telemetry for 30 s after the last good sample
         "ALR-AFTERHOURS-EVT-P-002",
         "ALR-AFTERHOURS-EVT-P-003",
         "ALR-RESTRICTED-EVT-P-003",
@@ -139,8 +167,8 @@ def test_analyze_twice_never_duplicates_alerts(store):
     before = store.query_alerts()
     second = analyze(store)
     assert store.query_alerts() == before
-    assert store.count_alerts() == first.alerts == 6
-    assert (first.replaced_alerts, second.replaced_alerts) == (0, 6)
+    assert store.count_alerts() == first.alerts == 7
+    assert (first.replaced_alerts, second.replaced_alerts) == (0, 7)
     links = store._conn.execute("SELECT COUNT(*) FROM alert_events").fetchone()[0]
     assert links == sum(len(a.event_ids) for a in before)
 
@@ -155,15 +183,16 @@ def test_changing_the_rules_config_replaces_the_alerts(store, tmp_path):
         encoding="utf-8",
     )
     summary = analyze(store, load_rules_config(rules))
-    assert summary.by_rule == {"restricted_zone_entry": 1}  # 480 s < 600 s; 3 appearances < 4
-    assert summary.replaced_alerts == 6 and store.count_alerts() == 1
+    # 480 s < 600 s; 3 appearances < 4; the telemetry outage and the restricted zone remain
+    assert summary.by_rule == {"restricted_zone_entry": 1, "signal_loss": 1}
+    assert summary.replaced_alerts == 7 and store.count_alerts() == 2
 
 
 def test_rebuilding_events_discards_alerts_that_cited_them(store):
     prepared(SECURITY, store)
     summary = build_events(store)
-    assert summary.discarded_alerts == 6 and store.count_alerts() == 0
-    assert analyze(store).alerts == 6  # regenerated from the rebuilt events
+    assert summary.discarded_alerts == 7 and store.count_alerts() == 0
+    assert analyze(store).alerts == 7  # regenerated from the rebuilt events
 
 
 def test_alert_evidence_chain_is_intact_down_to_frames(store):
@@ -211,9 +240,11 @@ def test_alert_filters(store):
     prepared(SECURITY, store)
     assert len(store.query_alerts(rule_id="after_hours_presence")) == 3
     assert [a.rule_id for a in store.query_alerts(severity=Severity.HIGH)] == [
-        "restricted_zone_entry"
+        "signal_loss",
+        "restricted_zone_entry",
     ]
-    assert len(store.query_alerts(zone=Zone.MAIN_GATE)) == 3  # 2 for the gate person + repeat
+    # 2 for the gate person + repeat vehicle + the link loss, which began while at the gate
+    assert len(store.query_alerts(zone=Zone.MAIN_GATE)) == 4
     assert store.query_alerts(rule_id="loitering", zone=Zone.WAREHOUSE) == []
 
 
@@ -240,26 +271,29 @@ def test_cli_analyze_summary_and_rerun(cli_db):
     for expected in (
         "Events analyzed",
         "Alerts generated",
-        "6",
+        "7",
         "after_hours_presence: 3",
         "loitering: 1",
-        "high: 1",
-        "medium: 4",
+        "signal_loss: 1",
+        "critical: 1",
+        "high: 2",
+        "medium: 3",
         "low: 1",
         "no LLM",
     ):
         assert expected in text
     code, text = run_cli("analyze", "--db", cli_db)
-    assert code == 0 and "Replaced previous alerts" in text and "6" in text
+    assert code == 0 and "Replaced previous alerts" in text and "7" in text
 
 
 def test_cli_alert_listing_and_filters(cli_db):
     run_cli("analyze", "--db", cli_db)
     code, text = run_cli("alerts", "--db", cli_db)
-    assert code == 0 and "6 alert(s)" in text
+    assert code == 0 and "7 alert(s)" in text
     assert "ALR-LOITER-EVT-P-001" in text and "Person loitering at main_gate" in text
     code, text = run_cli("alerts", "--db", cli_db, "--severity", "high")
-    assert "1 alert(s)" in text and "ALR-RESTRICTED-EVT-P-003" in text
+    assert "2 alert(s)" in text and "ALR-RESTRICTED-EVT-P-003" in text
+    assert "ALR-SIGNAL-20260929T183630Z" in text
     code, text = run_cli("alerts", "--db", cli_db, "--rule", "repeat_vehicle")
     assert "1 alert(s)" in text and "Repeat vehicle: similar blue pickup" in text
 
@@ -270,9 +304,10 @@ def test_cli_show_loitering_alert_exposes_facts_and_evidence(cli_db):
     assert code == 0
     for expected in (
         "severity:",
-        "medium",
+        "critical",
         "reason:",
         "480s",
+        "120s",
         "300s",
         "duration_seconds",
         "threshold_seconds",

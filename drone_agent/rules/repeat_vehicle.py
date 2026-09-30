@@ -7,7 +7,7 @@ separate appearances", never "the same vehicle returned".
 from collections.abc import Iterable
 
 from drone_agent.models import Alert, Entity, Event, MatchLevel
-from drone_agent.rules.common import alert_id, frame_union
+from drone_agent.rules.common import alert_id, frame_union, triage_fields
 from drone_agent.rules.config import RepeatVehicleRule
 
 RULE_ID = "repeat_vehicle"
@@ -61,7 +61,15 @@ def evaluate(
                     "entity_label": entity.label,
                     "zones": sorted({e.zone.value for e in appearances}),
                     "comparison": "appearance_count >= minimum_appearances",
+                    **(
+                        {"match_score": entity.match_score}
+                        if entity.match_score is not None
+                        else {}
+                    ),
                 },
+                **triage_fields(
+                    RULE_ID, cfg.severity, reached.first_seen, appearances, cfg.recommended_action
+                ),
             )
         )
     return alerts

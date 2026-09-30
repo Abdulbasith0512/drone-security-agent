@@ -4,7 +4,7 @@ from datetime import datetime
 
 from drone_agent.eval.base import IST, ExperimentResult, Timeline, det, fmt
 from drone_agent.eval.harness import run_pipeline, scenario_observations
-from drone_agent.models import CloseReason, Event, ObjectType, Observation, Zone
+from drone_agent.models import CloseReason, Event, ObjectType, Observation, Severity, Zone
 from drone_agent.pipeline import EntityLinker, EventConfig
 from drone_agent.pipeline.config import AggregationSettings
 
@@ -114,13 +114,18 @@ def _flicker_summary(observations: list[Observation], max_missed: int) -> dict:
         "durations_s": [e.duration_seconds for e in person],
         "close_reasons": [e.close_reason.value for e in person],
         "loitering_alerts": sum(1 for a in alerts if a.rule_id == "loitering"),
+        "loitering_severities": sorted(
+            (a.severity.value for a in alerts if a.rule_id == "loitering"),
+            key=lambda v: Severity(v).rank,
+        ),
     }
 
 
 def gap_fixture(missed: int) -> list[Observation]:
     """A person seen for 4 frames, `missed` frames with no detection, then 4 more frames (60 s
     apart, main gate, daytime). One continuous episode lasts (7 + missed) minutes; each half
-    alone lasts 3 minutes, below the 5-minute loitering threshold."""
+    alone lasts 3 minutes: above the 2-minute loitering warning but below the 5-minute critical
+    threshold, so a split turns one CRITICAL alert into two WARNING alerts."""
     tl = Timeline(DAY)
     step = 0
     for _ in range(4):
@@ -164,17 +169,20 @@ def run_flicker() -> ExperimentResult:
             "person_events": r["person_events"],
             "durations_s": str(r["durations_s"]),
             "loitering_alerts": r["loitering_alerts"],
+            "loitering_severities": str(r["loitering_severities"]),
         }
         for r in sweep
     ]
     interpretation = [
         f"security_events frames 1-9 (one continuous loitering episode, one undetected frame): "
         f"max_missed_frames={settings[1]} gives {base['person_events']} event(s) "
-        f"{base['durations_s']} s and {base['loitering_alerts']} loitering alert(s); "
-        f"max_missed_frames=0 gives {ablated['person_events']} event(s) {ablated['durations_s']} s "
-        f"and {ablated['loitering_alerts']} loitering alert(s).",
+        f"{base['durations_s']} s and {base['loitering_alerts']} loitering alert(s) "
+        f"{base['loitering_severities']}; max_missed_frames=0 gives {ablated['person_events']} "
+        f"event(s) {ablated['durations_s']} s and {ablated['loitering_alerts']} loitering "
+        f"alert(s) {ablated['loitering_severities']}.",
         "Loitering is decided from an event's duration, so a split changes downstream security "
-        "reasoning whenever each fragment falls under the threshold.",
+        "reasoning: fragments that each fall under a threshold lose that alert, and here each "
+        "fragment is long enough to warn but too short to reach the critical rung.",
         f"Gap sweep (default setting): a gap of up to {absorbed} consecutive missed frame(s) "
         f"kept one event; a gap of {absorbed + 1} split it (the tolerance is bounded on "
         "purpose, so a person who really left is not merged forever).",

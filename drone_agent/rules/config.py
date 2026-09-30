@@ -15,17 +15,37 @@ _OFFSET = re.compile(r"^([+-])(\d{2}):(\d{2})$")
 
 class ZoneThreshold(DomainModel):
     threshold_seconds: float = Field(gt=0)
+    # Optional second rung: once the same event lasts this long the SAME alert is escalated to
+    # CRITICAL (it is not replaced by a new alert). None = a single-severity rule.
+    critical_after_seconds: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _ladder_ascends(self) -> "ZoneThreshold":
+        if (
+            self.critical_after_seconds is not None
+            and self.critical_after_seconds <= self.threshold_seconds
+        ):
+            raise ValueError("critical_after_seconds must be greater than threshold_seconds")
+        return self
 
 
 class LoiteringRule(DomainModel):
-    """A monitored object stays in a monitored zone for at least `threshold_seconds`."""
+    """A monitored object stays in a monitored zone for at least `threshold_seconds`.
+
+    The alert opens at `severity` (the WARNING rung) after `threshold_seconds`; if the zone also
+    sets `critical_after_seconds` the same alert escalates to CRITICAL after that long.
+    """
 
     enabled: bool = True
     severity: Severity = Severity.MEDIUM
     object_types: list[ObjectType] = Field(default_factory=lambda: [ObjectType.PERSON])
     zones: dict[Zone, ZoneThreshold] = Field(
-        default_factory=lambda: {Zone.MAIN_GATE: ZoneThreshold(threshold_seconds=300)}
+        default_factory=lambda: {
+            Zone.MAIN_GATE: ZoneThreshold(threshold_seconds=120, critical_after_seconds=300)
+        }
     )
+    recommended_action: str | None = None  # None = the built-in wording (rules/common.py)
+    critical_action: str | None = None
 
     @model_validator(mode="after")
     def _has_targets(self) -> "LoiteringRule":
@@ -50,6 +70,7 @@ class AfterHoursRule(DomainModel):
     closed_until: time = time(6, 0)
     utc_offset: str | None = None
     zones: list[Zone] = Field(default_factory=list)  # empty = every zone
+    recommended_action: str | None = None
 
     @field_validator("closed_from", "closed_until", mode="before")
     @classmethod
@@ -91,6 +112,7 @@ class RepeatVehicleRule(DomainModel):
     enabled: bool = True
     severity: Severity = Severity.LOW
     minimum_appearances: int = Field(default=3, ge=2)
+    recommended_action: str | None = None
 
 
 class RestrictedZoneRule(DomainModel):
@@ -102,6 +124,7 @@ class RestrictedZoneRule(DomainModel):
     object_types: list[ObjectType] = Field(
         default_factory=lambda: [ObjectType.PERSON, ObjectType.VEHICLE]
     )
+    recommended_action: str | None = None
 
     @model_validator(mode="after")
     def _has_targets(self) -> "RestrictedZoneRule":
@@ -110,11 +133,95 @@ class RestrictedZoneRule(DomainModel):
         return self
 
 
+class LowBatteryRule(DomainModel):
+    """Battery at or below `warning_percent` (severity), at or below `critical_percent` (CRITICAL).
+
+    One alert per low-battery episode; it resolves when the battery recovers to `recover_percent`.
+    """
+
+    enabled: bool = True
+    severity: Severity = Severity.MEDIUM
+    warning_percent: float = Field(default=20.0, gt=0, le=100)
+    critical_percent: float = Field(default=10.0, ge=0, le=100)
+    recover_percent: float = Field(default=25.0, gt=0, le=100)
+    recommended_action: str | None = None
+    critical_action: str | None = None
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "LowBatteryRule":
+        if not self.critical_percent < self.warning_percent < self.recover_percent:
+            raise ValueError(
+                "low_battery needs critical_percent < warning_percent < recover_percent"
+            )
+        return self
+
+
+class SignalLossRule(DomainModel):
+    """Link quality. Degraded below `degraded_below_percent` (severity); lost below
+    `lost_below_percent`, or when no telemetry arrives for more than `gap_seconds` (HIGH)."""
+
+    enabled: bool = True
+    severity: Severity = Severity.MEDIUM
+    lost_severity: Severity = Severity.HIGH
+    degraded_below_percent: float = Field(default=40.0, gt=0, le=100)
+    lost_below_percent: float = Field(default=15.0, ge=0, le=100)
+    gap_seconds: float = Field(default=30.0, gt=0)
+    recommended_action: str | None = None
+    lost_action: str | None = None
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "SignalLossRule":
+        if not self.lost_below_percent < self.degraded_below_percent:
+            raise ValueError("signal_loss needs lost_below_percent < degraded_below_percent")
+        if self.lost_severity.rank < self.severity.rank:
+            raise ValueError("signal_loss lost_severity must not be lower than severity")
+        return self
+
+
+class AltitudeRule(DomainModel):
+    """Altitude outside the safe patrol envelope [min_m, max_m] (severity); beyond the severe
+    limits it is HIGH. One alert per excursion; it resolves when the drone is back in range."""
+
+    enabled: bool = True
+    severity: Severity = Severity.MEDIUM
+    min_m: float = Field(default=5.0, ge=0)
+    max_m: float = Field(default=120.0, gt=0)
+    severe_min_m: float = Field(default=2.0, ge=0)
+    severe_max_m: float = Field(default=150.0, gt=0)
+    recommended_action: str | None = None
+    severe_action: str | None = None
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "AltitudeRule":
+        if not self.severe_min_m <= self.min_m < self.max_m <= self.severe_max_m:
+            raise ValueError("altitude needs severe_min_m <= min_m < max_m <= severe_max_m")
+        return self
+
+
+class GeofenceRule(DomainModel):
+    """The drone is further than `radius_m` from the property's centre (HIGH), or further than
+    `radius_m * critical_factor` (CRITICAL). Resolves when it is back inside."""
+
+    enabled: bool = True
+    severity: Severity = Severity.HIGH
+    center_latitude: float = Field(default=0.0004, ge=-90, le=90)
+    center_longitude: float = Field(default=0.00045, ge=-180, le=180)
+    radius_m: float = Field(default=100.0, gt=0)
+    critical_factor: float = Field(default=1.5, gt=1.0)
+    recommended_action: str | None = None
+    critical_action: str | None = None
+
+
 class SecurityRulesConfig(DomainModel):
     loitering: LoiteringRule = Field(default_factory=LoiteringRule)
     after_hours_presence: AfterHoursRule = Field(default_factory=AfterHoursRule)
     repeat_vehicle: RepeatVehicleRule = Field(default_factory=RepeatVehicleRule)
     restricted_zone_entry: RestrictedZoneRule = Field(default_factory=RestrictedZoneRule)
+    # Drone-safety rules over telemetry (no camera involved).
+    low_battery: LowBatteryRule = Field(default_factory=LowBatteryRule)
+    signal_loss: SignalLossRule = Field(default_factory=SignalLossRule)
+    altitude_anomaly: AltitudeRule = Field(default_factory=AltitudeRule)
+    geofence_violation: GeofenceRule = Field(default_factory=GeofenceRule)
 
 
 def load_rules_config(path: str | Path | None = None) -> SecurityRulesConfig:

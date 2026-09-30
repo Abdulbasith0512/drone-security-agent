@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from datetime import datetime, time, timedelta, timezone, tzinfo
 
 from drone_agent.models import Alert, Event
-from drone_agent.rules.common import alert_id, frame_union, type_label
+from drone_agent.rules.common import alert_id, frame_union, triage_fields, type_label
 from drone_agent.rules.config import AfterHoursRule
 
 RULE_ID = "after_hours_presence"
@@ -88,6 +88,7 @@ def evaluate(events: Iterable[Event], cfg: AfterHoursRule) -> list[Alert]:
                     "closed_from": _fmt(cfg.closed_from),
                     "closed_until": _fmt(cfg.closed_until),
                 },
+                **triage_fields(RULE_ID, cfg.severity, start, [ev], cfg.recommended_action),
             )
         )
     return alerts

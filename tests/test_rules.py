@@ -28,6 +28,9 @@ from drone_agent.rules.config import (
 )
 
 DAY = datetime(2026, 9, 29, 0, 0, tzinfo=IST)
+# The pre-M9 single-threshold rule: one alert at 300 s, no escalation. The shipped default now
+# has a ladder (WARNING at 120 s, CRITICAL at 300 s); these tests pin the boundary behaviour.
+SINGLE_THRESHOLD = LoiteringRule(zones={Zone.MAIN_GATE: ZoneThreshold(threshold_seconds=300)})
 
 
 def at(hour: int, minute: int = 0, second: int = 0, day: int = 0, tz=IST) -> datetime:
@@ -57,17 +60,17 @@ def make_event(
 
 # ---- loitering ------------------------------------------------------------------------------
 def test_loitering_below_threshold_does_not_fire():
-    assert loitering.evaluate([make_event(seconds=299)], LoiteringRule()) == []
+    assert loitering.evaluate([make_event(seconds=299)], SINGLE_THRESHOLD) == []
 
 
 def test_loitering_exactly_at_threshold_fires_boundary_is_inclusive():
-    (alert,) = loitering.evaluate([make_event(seconds=300)], LoiteringRule())
+    (alert,) = loitering.evaluate([make_event(seconds=300)], SINGLE_THRESHOLD)
     assert alert.facts["duration_seconds"] == 300 == alert.facts["threshold_seconds"]
 
 
 def test_loitering_above_threshold_fires_with_facts_and_evidence():
     ev = make_event(seconds=480, frames=(1, 2, 3, 4, 6, 7, 8, 9))
-    (alert,) = loitering.evaluate([ev], LoiteringRule())
+    (alert,) = loitering.evaluate([ev], SINGLE_THRESHOLD)
     assert alert.alert_id == "ALR-LOITER-EVT-P-001"
     assert alert.rule_id == "loitering" and alert.severity is Severity.MEDIUM
     assert alert.facts == {
@@ -76,6 +79,7 @@ def test_loitering_above_threshold_fires_with_facts_and_evidence():
         "duration_seconds": 480,
         "threshold_seconds": 300,
         "comparison": "duration_seconds >= threshold_seconds",
+        "level": "medium",
     }
     assert alert.triggered_at == ev.first_seen + timedelta(
         seconds=300
@@ -110,7 +114,8 @@ def test_loitering_only_applies_to_monitored_zones_and_object_types():
 
 def test_loitering_disabled_and_severity_configurable():
     assert loitering.evaluate([make_event(seconds=900)], LoiteringRule(enabled=False)) == []
-    (alert,) = loitering.evaluate([make_event(seconds=900)], LoiteringRule(severity=Severity.HIGH))
+    single_high = LoiteringRule(severity=Severity.HIGH, zones=SINGLE_THRESHOLD.zones)
+    (alert,) = loitering.evaluate([make_event(seconds=900)], single_high)
     assert alert.severity is Severity.HIGH
 
 
@@ -347,7 +352,8 @@ def test_engine_with_all_rules_disabled_returns_nothing():
 def test_shipped_rules_yaml_equals_built_in_defaults():
     shipped = load_rules_config(ROOT / "config" / "security_rules.yaml")
     assert shipped == SecurityRulesConfig() == load_rules_config()
-    assert shipped.loitering.zones[Zone.MAIN_GATE].threshold_seconds == 300
+    gate = shipped.loitering.zones[Zone.MAIN_GATE]
+    assert (gate.threshold_seconds, gate.critical_after_seconds) == (120, 300)
     assert (
         shipped.after_hours_presence.closed_from.hour,
         shipped.after_hours_presence.closed_until.hour,
@@ -402,3 +408,76 @@ def test_rule_models_reject_direct_misuse():
         AfterHoursRule(closed_from=1320)
     with pytest.raises(ValidationError):
         RepeatVehicleRule(minimum_appearances=0)
+
+
+# ---- escalation ladder, triage fields and lifecycle inputs (M9) --------------------------------
+def gate_event(seconds: int, reason=CloseReason.GAP) -> Event:
+    return make_event(seconds=seconds).model_copy(
+        update={"close_reason": reason, "confidence": 0.92}
+    )
+
+
+def test_default_loitering_ladder_warns_at_120s_and_escalates_at_300s():
+    rule = LoiteringRule()
+    assert loitering.evaluate([gate_event(119)], rule) == []
+    (warn,) = loitering.evaluate([gate_event(120)], rule)
+    assert warn.severity is Severity.MEDIUM and [s.label for s in warn.ladder] == ["warning"]
+    (still,) = loitering.evaluate([gate_event(299)], rule)
+    assert still.severity is Severity.MEDIUM and len(still.ladder) == 1
+    (crit,) = loitering.evaluate([gate_event(300)], rule)
+    assert crit.severity is Severity.CRITICAL
+    assert [(s.label, s.severity) for s in crit.ladder] == [
+        ("warning", Severity.MEDIUM),
+        ("critical", Severity.CRITICAL),
+    ]
+    # one alert that escalates: the id never changes and triggered_at stays at the first rung
+    assert warn.alert_id == still.alert_id == crit.alert_id
+    assert warn.triggered_at == crit.triggered_at == crit.first_seen + timedelta(seconds=120)
+    assert crit.ladder[1].at == crit.first_seen + timedelta(seconds=300)
+
+
+def test_loitering_alert_resolves_only_when_the_object_was_seen_leaving():
+    for reason in (CloseReason.GAP, CloseReason.MISSED_FRAMES, CloseReason.ZONE_CHANGE):
+        (alert,) = loitering.evaluate([gate_event(200, reason)], LoiteringRule())
+        assert alert.status.value == "resolved" and alert.resolved_at == alert.last_seen
+    for reason in (CloseReason.SCENARIO_END, CloseReason.OPEN):
+        (alert,) = loitering.evaluate([gate_event(200, reason)], LoiteringRule())
+        assert alert.status.value == "open" and alert.resolved_at is None
+
+
+def test_alerts_carry_confidence_verdict_and_a_recommended_action():
+    (alert,) = loitering.evaluate([gate_event(400)], LoiteringRule())
+    assert alert.confidence == 0.92
+    assert alert.verdict.value == "critical" and "Dispatch security" in alert.recommended_action
+    (warning,) = loitering.evaluate([gate_event(150)], LoiteringRule())
+    assert warning.verdict.value == "suspicious"
+    assert "verify the person" in warning.recommended_action
+    custom = LoiteringRule(recommended_action="Call the guard", critical_action="Lock the gate")
+    assert loitering.evaluate([gate_event(150)], custom)[0].recommended_action == "Call the guard"
+    assert loitering.evaluate([gate_event(400)], custom)[0].recommended_action == "Lock the gate"
+
+
+def test_every_event_rule_fills_verdict_action_confidence_and_a_ladder():
+    event = make_event("EVT-P-003", zone=Zone.RESTRICTED_ZONE, first=at(23, 41), seconds=600)
+    alerts = RuleEngine().run([event.model_copy(update={"confidence": 0.8})], [])
+    assert {a.rule_id for a in alerts} == {"after_hours_presence", "restricted_zone_entry"}
+    for alert in alerts:
+        assert alert.verdict is not None and alert.recommended_action
+        assert alert.confidence == 0.8
+        assert [s.severity for s in alert.ladder] == [alert.severity]
+        assert alert.status.value == "open"
+
+
+def test_ladder_configuration_is_validated():
+    with pytest.raises(ValidationError, match="critical_after_seconds"):
+        ZoneThreshold(threshold_seconds=300, critical_after_seconds=300)
+    with pytest.raises(ValidationError, match="critical_after_seconds"):
+        ZoneThreshold(threshold_seconds=300, critical_after_seconds=60)
+    only_warning = LoiteringRule(zones={Zone.MAIN_GATE: ZoneThreshold(threshold_seconds=60)})
+    assert loitering.evaluate([gate_event(9000)], only_warning)[0].severity is Severity.MEDIUM
+
+
+def test_a_critical_base_severity_has_no_second_rung():
+    rule = LoiteringRule(severity=Severity.CRITICAL)
+    (alert,) = loitering.evaluate([gate_event(900)], rule)
+    assert alert.severity is Severity.CRITICAL and len(alert.ladder) == 1

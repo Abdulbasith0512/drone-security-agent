@@ -57,17 +57,25 @@ def build_matrix() -> list[Scenario]:
     def add(name, purpose, timeline: Timeline, **expected: int) -> None:
         s.append(Scenario(name, purpose, timeline.observations, expected))
 
-    # --- loitering (main_gate, persons, >= 300 s, daytime so after-hours stays quiet) -------
+    # --- loitering (main_gate, persons, >= 120 s warning, escalating at 300 s; daytime so
+    # after-hours stays quiet). Counts only: severity progression is scored by the ground-truth
+    # scenarios (eval/ground_truth.py).
     add(
         "loiter_exact_threshold",
-        "person at the gate for exactly 300 s",
-        Timeline(at(12)).run(Zone.MAIN_GATE, [m * 60 for m in range(6)], person()),
+        "person at the gate for exactly 120 s",
+        Timeline(at(12)).run(Zone.MAIN_GATE, [0, 60, 120], person()),
         loitering=1,
     )
     add(
         "loiter_below_threshold",
-        "person at the gate for 240 s",
-        Timeline(at(12)).run(Zone.MAIN_GATE, _minutes(5), person()),
+        "person at the gate for 119 s",
+        Timeline(at(12)).run(Zone.MAIN_GATE, [0, 60, 119], person()),
+    )
+    add(
+        "loiter_past_critical_threshold",
+        "person at the gate for 300 s (one alert that escalates, not two alerts)",
+        Timeline(at(12)).run(Zone.MAIN_GATE, [m * 60 for m in range(6)], person()),
+        loitering=1,
     )
     add(
         "loiter_other_zone",

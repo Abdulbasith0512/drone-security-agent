@@ -46,11 +46,15 @@ class _OpenEvent:
     raw: dict[str, dict[str, int]] = field(default_factory=dict)  # key -> raw value -> count
     norm: dict[str, dict[str, int]] = field(default_factory=dict)  # key -> normalised -> count
     missed: int = 0
+    confidence_sum: float = 0.0
+    detections: int = 0
 
     def add(self, obs: Observation, det: DetectedObject, cfg: EventConfig) -> None:
         self.last_seen = obs.timestamp
         self.observation_ids.append(obs.observation_id)
         self.frame_ids.append(obs.frame_id)
+        self.confidence_sum += det.confidence
+        self.detections += 1
         if det.activity and det.activity not in self.activities:
             self.activities.append(det.activity)
         for key, value in det.attributes.items():
@@ -82,6 +86,9 @@ class _OpenEvent:
             observation_ids=self.observation_ids,
             frame_ids=self.frame_ids,
             close_reason=reason,
+            confidence=(
+                round(self.confidence_sum / self.detections, 4) if self.detections else None
+            ),
         )
 
 
@@ -146,6 +153,17 @@ class EventAggregator:
             still_open.append(ev)
         self._open = still_open
         return closed
+
+    def snapshot_open(self) -> list[Event]:
+        """The events still being extended, as OPEN events (streaming view; nothing is closed).
+
+        Ordered like the final result (first_seen, then id), so a live run can run the rules
+        over `closed + snapshot_open()` and get the same events the batch path will end with.
+        """
+        return sorted(
+            (ev.to_event(CloseReason.OPEN) for ev in self._open),
+            key=lambda e: (e.first_seen, e.event_id),
+        )
 
     def flush(self) -> list[Event]:
         """Close every open event (end of input)."""

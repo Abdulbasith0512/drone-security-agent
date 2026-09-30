@@ -3,7 +3,7 @@
 from collections.abc import Iterable
 
 from drone_agent.models import Alert, Event
-from drone_agent.rules.common import alert_id, frame_union, type_label
+from drone_agent.rules.common import alert_id, frame_union, triage_fields, type_label
 from drone_agent.rules.config import RestrictedZoneRule
 
 RULE_ID = "restricted_zone_entry"
@@ -40,6 +40,7 @@ def evaluate(events: Iterable[Event], cfg: RestrictedZoneRule) -> list[Alert]:
                     "object_type": ev.object_type.value,
                     "duration_seconds": ev.duration_seconds,
                 },
+                **triage_fields(RULE_ID, cfg.severity, ev.first_seen, [ev], cfg.recommended_action),
             )
         )
     return alerts

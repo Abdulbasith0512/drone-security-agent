@@ -107,12 +107,29 @@ def build_ablation_table(results: dict[str, ExperimentResult]) -> list[dict]:
                 "ablated_setting": "max_missed_frames=0",
                 "ablated": fl["max_missed_frames=0"][field],
                 "effect": _signed(fl["max_missed_frames=0"][field] - fl[base_key][field]),
-                "interpretation": "one undetected frame splits the episode and can remove the "
-                "loitering alert"
+                "interpretation": "one undetected frame splits the episode into fragments that "
+                "each alert at the warning level instead of one escalated alert"
                 if field == "loitering_alerts"
                 else "one undetected frame splits one continuous episode",
             }
         )
+    top = {
+        key: (fl[key]["loitering_severities"] or ["none"])[-1]
+        for key in (base_key, "max_missed_frames=0")
+    }
+    rows.append(
+        {
+            "component": "Flicker tolerance",
+            "metric": "highest loitering severity from that episode",
+            "baseline_setting": base_key + " (default)",
+            "baseline": top[base_key],
+            "ablated_setting": "max_missed_frames=0",
+            "ablated": top["max_missed_frames=0"],
+            "effect": f"{top[base_key]} -> {top['max_missed_frames=0']}",
+            "interpretation": "the split fragments never reach the critical threshold, so the "
+            "escalation is lost",
+        }
+    )
     em = results["entity_memory"].measured
     for metric, field in (
         ("repeat-vehicle alerts (security_events)", "repeat_vehicle_alerts"),

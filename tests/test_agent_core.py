@@ -137,9 +137,9 @@ def test_alert_tools_return_rule_output_with_evidence(tools):
     assert [e["ref"] for e in res["events"]] == [f"event:EVT-V-00{i}" for i in (1, 2, 3)]
     assert {"alert:ALR-REPEAT-ENT-V-001", "entity:ENT-V-001", "frame:10"} <= tools.retrieved
     assert tools.get_alert("ALR-NOPE")["error"].startswith("no alert")
-    assert tools.list_alerts()["total"] == 6
+    assert tools.list_alerts()["total"] == 7
     assert tools.list_alerts(rule_id="loitering")["total"] == 1
-    assert tools.list_alerts(severity="high")["total"] == 1
+    assert tools.list_alerts(severity="high")["total"] == 2  # restricted zone + the link loss
     assert tools.list_alerts(zone="warehouse")["total"] == 1
     assert "severity must be one of" in tools.list_alerts(severity="extreme")["error"]
     assert tools.list_alerts(limit=2)["truncated"] is True
@@ -163,10 +163,10 @@ def test_run_summary_facts(tools):
     facts = tools.get_run_summary()
     assert facts["counts"] == {
         "frames": 27, "observations": 27, "detected_objects": 20, "events": 7,
-        "entities": 2, "alerts": 6,
+        "entities": 2, "alerts": 7,
     }  # fmt: skip
     assert facts["object_counts"] == {"person": 13, "vehicle": 7}
-    assert facts["alerts_by_severity"] == {"high": 1, "low": 1, "medium": 4}
+    assert facts["alerts_by_severity"] == {"critical": 1, "high": 2, "low": 1, "medium": 3}
     assert facts["observation_span"]["first"].startswith("2026-09-29T23:41")
     assert any("simulated" in lim for lim in facts["limitations"])
     assert any("coarse" in lim for lim in facts["limitations"])
@@ -311,14 +311,14 @@ def test_after_hours_answer_does_not_link_people_across_events(store):
 
 def test_severity_comes_from_the_rule_not_the_analyst(store):
     text = AnalystSession(store).ask("Why was the loitering alert raised?").text
-    assert "severity medium" in text and "deterministic rule 'loitering'" in text
+    assert "severity critical" in text and "deterministic rule 'loitering'" in text
     assert "not by a language model" in text
 
 
 def test_other_template_questions(store):
     s = AnalystSession(store)
     listing = s.ask("List the alerts").text
-    assert listing.startswith("6 stored alert(s)") and listing.count("[alert:") == 6
+    assert listing.startswith("7 stored alert(s)") and listing.count("[alert:") == 7
     assert "[event:EVT-V-001]" in s.ask("Describe EVT-V-001").text
     assert "[entity:ENT-V-001]" in s.ask("tell me about ENT-V-001").text
     assert "[alert:ALR-RESTRICTED-EVT-P-003]" in s.ask("Was there a restricted zone alert?").text
@@ -356,7 +356,7 @@ def test_template_outputs_never_contain_intent_or_identity_claims(store):
 def test_offline_summary_states_counts_significant_events_entities_and_limits(store):
     answer = AnalystSession(store).summarize()
     text = answer.text
-    assert "27 observation(s)" in text and "7 event(s)" in text and "6 alert(s)" in text
+    assert "27 observation(s)" in text and "7 event(s)" in text and "7 alert(s)" in text
     assert "Significant events (linked to alerts)" in text and "[event:EVT-P-003]" in text
     assert "similar blue pickup [entity:ENT-V-001]" in text and "3 separate appearance(s)" in text
     assert "Limitations:" in text and "simulated" in text

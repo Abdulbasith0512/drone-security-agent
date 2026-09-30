@@ -1,17 +1,23 @@
 # Deterministic security rules. These values equal the built-in defaults; pass a modified copy with
-# `analyze --rules`. Rules decide whether an alert exists; no LLM is involved in any of them.
+# `analyze --rules` (or `run --rules`). Rules decide whether an alert exists; no LLM is involved.
 #
-# Severity is FIXED per rule (low | medium | high | critical). There is no automatic escalation.
+# Severity ladders: a rule may raise an alert at one severity and ESCALATE THE SAME ALERT to a higher
+# one when the condition worsens (it is never replaced by a second alert). Each alert also carries a
+# lifecycle (open -> escalated -> acknowledged -> resolved), a confidence, a verdict and a recommended
+# action. State alerts (loitering, safety) resolve themselves when the condition ends; incident alerts
+# (after hours, repeat vehicle, restricted zone) stay open until an operator acts on them.
 # Overlap policy: different rules MAY alert on the same event (they describe different risks);
-# an identical (rule, event/entity) pair produces exactly one alert.
+# an identical (rule, event/entity/episode) pair produces exactly one alert.
 
 loitering:
   enabled: true
-  severity: medium
+  severity: medium                # the WARNING rung
   object_types: [person]
   zones:
     main_gate:
-      threshold_seconds: 300      # alert once an event's duration reaches 300 s (>=)
+      threshold_seconds: 120      # WARNING once an event's duration reaches 120 s (>=)
+      critical_after_seconds: 300 # the same alert escalates to CRITICAL at 300 s (omit for no escalation)
+  # recommended_action / critical_action: optional operator wording (built-in text if omitted)
 
 after_hours_presence:
   enabled: true
@@ -37,3 +43,35 @@ restricted_zone_entry:
   severity: high
   zones: [restricted_zone]
   object_types: [person, vehicle]
+
+# ---- drone-safety rules over telemetry (no camera involved) -------------------------------------
+low_battery:
+  enabled: true
+  severity: medium                # WARNING at or below warning_percent
+  warning_percent: 20
+  critical_percent: 10            # CRITICAL at or below this
+  recover_percent: 25             # the alert resolves once the battery is back at or above this
+
+signal_loss:
+  enabled: true
+  severity: medium                # degraded link
+  lost_severity: high             # lost link
+  degraded_below_percent: 40
+  lost_below_percent: 15
+  gap_seconds: 30                 # no telemetry for longer than this counts as a lost link
+
+altitude_anomaly:
+  enabled: true
+  severity: medium
+  min_m: 5
+  max_m: 120
+  severe_min_m: 2                 # beyond the severe limits the alert is HIGH
+  severe_max_m: 150
+
+geofence_violation:
+  enabled: true
+  severity: high
+  center_latitude: 0.0004         # synthetic coordinates near (0, 0)
+  center_longitude: 0.00045
+  radius_m: 100
+  critical_factor: 1.5            # CRITICAL beyond radius_m * critical_factor

@@ -120,7 +120,7 @@ def test_adapter_runs_tool_calls_then_returns_the_final_text(db_path):
         )
         tool_msg = second_call[-1]
         assert isinstance(tool_msg, ToolMessage) and tool_msg.tool_call_id == "c1"
-        assert json.loads(tool_msg.content)["alert"]["severity"] == "medium"
+        assert json.loads(tool_msg.content)["alert"]["severity"] == "critical"
         assert "alert:ALR-LOITER-EVT-P-001" in session.tools.retrieved
 
 
@@ -154,7 +154,7 @@ def test_unknown_tools_and_bad_arguments_are_reported_back_not_raised(db_path):
         assert answer.mode == "llm"
         results = [m.content for m in chat.seen[1] if isinstance(m, ToolMessage)]
         assert "unknown tool 'run_sql'" in results[0] and "error" in results[1]
-        assert store.count_alerts() == 6  # nothing was executed against the database
+        assert store.count_alerts() == 7  # nothing was executed against the database
 
 
 def test_tool_loop_is_bounded(db_path):

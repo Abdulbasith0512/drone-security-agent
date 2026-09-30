@@ -168,7 +168,10 @@ def test_flicker_ablation_changes_events_and_the_loitering_alert(results):
     episode = results["flicker"]["measured"]["loitering_episode"]
     default, ablated = episode["max_missed_frames=2"], episode["max_missed_frames=0"]
     assert (default["person_events"], default["loitering_alerts"]) == (1, 1)
-    assert (ablated["person_events"], ablated["loitering_alerts"]) == (2, 0)
+    assert default["loitering_severities"] == ["critical"]  # 480 s passed the 300 s rung
+    # each 180 s fragment passes the 120 s warning but never reaches the 300 s critical rung
+    assert (ablated["person_events"], ablated["loitering_alerts"]) == (2, 2)
+    assert ablated["loitering_severities"] == ["medium", "medium"]
     assert ablated["durations_s"] == [180.0, 180.0]
 
 

@@ -2,10 +2,14 @@
 
 from drone_agent.video.gate import FrameGate, GateConfig, GateDecision
 from drone_agent.video.ingest import (
+    DEFAULT_MAX_CARRY_SECONDS,
     CandidateRecord,
+    FailurePolicy,
     SkippedPolicy,
     VideoIngestConfig,
     VideoIngestResult,
+    VideoStep,
+    VideoStream,
     run_video_ingest,
 )
 from drone_agent.video.sampling import (
@@ -25,7 +29,9 @@ from drone_agent.video.timeline import (
 )
 
 __all__ = [
+    "DEFAULT_MAX_CARRY_SECONDS",
     "CandidateRecord",
+    "FailurePolicy",
     "FrameGate",
     "GateConfig",
     "GateDecision",
@@ -39,6 +45,8 @@ __all__ = [
     "VideoIngestResult",
     "VideoMetadata",
     "VideoSource",
+    "VideoStep",
+    "VideoStream",
     "VideoTimeline",
     "load_timeline",
     "plan_samples",

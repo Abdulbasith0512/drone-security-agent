@@ -19,7 +19,7 @@ from drone_agent.agent.build import (
 )
 from drone_agent.agent.config import AnalystConfig, AnalystConfigError
 from drone_agent.agent.session import AnalystSession, Answer
-from drone_agent.ingest import ingest_observations, ingest_result
+from drone_agent.ingest import ingest_observations, ingest_result, summarize_ingest
 from drone_agent.models import (
     DetectedObject,
     Entity,
@@ -32,10 +32,14 @@ from drone_agent.models import (
 )
 from drone_agent.pipeline import ConfigError, build_events, load_config
 from drone_agent.rules import analyze, load_rules_config
+from drone_agent.runtime.video import LiveVideoResult, run_video_live
+from drone_agent.runtime.view import LogView
 from drone_agent.scenario import ScenarioError, load_scenario
 from drone_agent.simulate import run_scenario
 from drone_agent.store import DuplicateRecordError, Fts5UnavailableError, Store, StoreError
 from drone_agent.video import (
+    DEFAULT_MAX_CARRY_SECONDS,
+    FailurePolicy,
     GateConfig,
     SamplingConfig,
     SkippedPolicy,
@@ -343,6 +347,10 @@ def _show_event_evidence(store: Store, event_id: str, console: Console) -> int:
     if event.activities:
         console.print(_cell(f"activities: {', '.join(event.activities)}"))
     console.print(_cell(f"closed by: {event.close_reason.value}"))
+    if event.departure_observed_at is not None:
+        console.print(_cell(f"departure observed at: {event.departure_observed_at.isoformat()}"))
+    elif not event.is_open:
+        console.print(_cell("departure: not observed (coverage ended; this is not proof it left)"))
     if event.entity_id:
         entity = store.get_entity(event.entity_id)
         if entity:
@@ -619,6 +627,9 @@ def _build_video_provider(
 
 
 def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
+    if (args.call_timeout is not None or args.fail_fast) and not args.live:
+        _error(console, "--call-timeout and --fail-fast apply to --live runs only")
+        return 2
     describer: CassetteDescriber | None = None
     gemini: GeminiDescriber | None = None
     try:
@@ -639,9 +650,36 @@ def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
                 threshold=args.gate_threshold,
             ),
             skipped=SkippedPolicy(args.skipped),
+            max_carry_seconds=args.max_carry_seconds or None,  # 0 switches the bound off
         )
+        live: LiveVideoResult | None = None
         try:
-            result = run_video_ingest(source, provider, timeline, config)
+            if args.live:
+                # progressive: each frame's observation, events and alerts are committed (and
+                # printed) as soon as the frame is processed, not after the whole video
+                try:
+                    with Store.open(args.db) as store:
+                        _note_migration(console, store)
+                        live = run_video_live(
+                            source, provider, timeline, store, config=config,
+                            listener=LogView(console),
+                            on_failure=FailurePolicy.RAISE if args.fail_fast
+                            else FailurePolicy.CONTINUE,
+                            call_timeout_s=args.call_timeout,
+                        )  # fmt: skip
+                except DuplicateRecordError as exc:
+                    _error(
+                        console,
+                        f"{exc}\nThe database already holds these records. Nothing was changed. "
+                        "Use a new --db path (or delete the file) to ingest again.",
+                    )
+                    return 1
+                except StoreError as exc:
+                    _error(console, str(exc))
+                    return 1
+                result = live.result
+            else:
+                result = run_video_ingest(source, provider, timeline, config)
         finally:
             # Keep every response already paid for, even if a later frame fails.
             if describer is not None and describer.recorded:
@@ -664,11 +702,14 @@ def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
         return 2
 
     try:
-        with Store.open(args.db) as store:
-            _note_migration(console, store)
-            summary = ingest_observations(
-                store, meta.source_name, result.telemetry, result.observations
-            )
+        if live is not None:  # already stored, frame by frame
+            summary = summarize_ingest(meta.source_name, result.telemetry, result.observations)
+        else:
+            with Store.open(args.db) as store:
+                _note_migration(console, store)
+                summary = ingest_observations(
+                    store, meta.source_name, result.telemetry, result.observations
+                )
     except DuplicateRecordError as exc:
         _error(
             console,
@@ -702,9 +743,22 @@ def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
         "Frame gate skipped (similar)",
         _cell(f"{result.gate_skipped} (policy: {args.skipped}; carried {result.carried})"),
     )
+    if result.forced_refreshes:
+        table.add_row(
+            "Forced refreshes",
+            _cell(
+                f"{result.forced_refreshes} (a scene was carried for "
+                f"{args.max_carry_seconds:g}s, so the provider was asked again)"
+            ),
+        )
     replays = f", cassette replays {describer.replayed}" if describer else ""
     table.add_row("Provider", _cell(provider.name))
     table.add_row("Provider calls", _cell(f"{result.provider_calls}{replays}"))
+    if result.failed:
+        table.add_row(
+            "PERCEPTION FAILURES",
+            _cell(f"{result.failed} frame(s): no observation stored for them (see below)"),
+        )
     if gemini is not None:
         table.add_row(
             "Gemini API requests",
@@ -739,6 +793,26 @@ def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
     )
     table.add_row("Stale telemetry associations", _cell(summary.stale_associations))
     table.add_row("Database", _cell(args.db))
+    if live is not None and live.pipeline is not None:
+        pipe = live.pipeline
+        first = live.first_alert_step
+        table.add_row(
+            "Processing",
+            _cell("LIVE: each frame committed before the next one was read (not batch)"),
+        )
+        table.add_row(
+            "Events / entities / alerts",
+            _cell(f"{len(pipe.events)} / {len(pipe.entities)} / {len(pipe.alerts)}"),
+        )
+        table.add_row(
+            "First alert",
+            _cell(
+                "none raised"
+                if first is None
+                else f"after frame {first.frame_index} ({first.offset_s:g}s into the video), "
+                f"with {len(live.steps) - live.steps.index(first) - 1} sampled frame(s) to come"
+            ),
+        )
     console.print(table)
 
     if args.verbose:
@@ -756,7 +830,10 @@ def ingest_video_command(args: argparse.Namespace, console: Console) -> int:
                 _cell(c.action),
             )
         console.print(detail)
-    return 0
+    failed = [c for c in result.candidates if c.action == "failed"]
+    for c in failed:
+        _error(console, f"frame {c.frame_index} ({c.offset_seconds:.2f}s): {c.error}")
+    return 3 if failed else 0  # 3: finished, but some frames have no observation
 
 
 def describe_frame_command(args: argparse.Namespace, console: Console) -> int:
@@ -1063,6 +1140,34 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
         choices=[z.value for z in Zone],
         default=Zone.MAIN_GATE.value,
         help="SIMULATED zone for the whole video (used when no --timeline)",
+    )
+    vid.add_argument(
+        "--live",
+        action="store_true",
+        help="process progressively: commit and print each frame's observation, events and alerts "
+        "as it is processed, instead of ingesting everything first (no build-events or analyze "
+        "step needed)",
+    )
+    vid.add_argument(
+        "--max-carry-seconds",
+        type=float,
+        default=DEFAULT_MAX_CARRY_SECONDS,
+        metavar="SECONDS",
+        help="never carry one observation over similar frames longer than this: ask the provider "
+        "again (forced refresh). 0 = no bound. Default: the adaptive sampler's max_skip_seconds",
+    )
+    vid.add_argument(
+        "--call-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="with --live: treat a provider call that takes longer than this as a failed frame",
+    )
+    vid.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="with --live: stop at the first provider failure instead of recording it and "
+        "continuing (what was already committed stays)",
     )
     vid.add_argument("--verbose", action="store_true", help="list every sample candidate")
 

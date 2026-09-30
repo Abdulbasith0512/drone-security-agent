@@ -18,6 +18,19 @@ class IngestSummary:
     stale_associations: int
 
 
+def summarize_ingest(
+    name: str, telemetry: Sequence[Telemetry], observations: Sequence[Observation]
+) -> IngestSummary:
+    return IngestSummary(
+        scenario=name,
+        frames=len(observations),
+        observations=len(observations),
+        objects=sum(len(o.detected_objects) for o in observations),
+        telemetry_samples=len(telemetry),
+        stale_associations=sum(1 for o in observations if o.telemetry and o.telemetry.stale),
+    )
+
+
 def ingest_observations(
     store: Store, name: str, telemetry: Sequence[Telemetry], observations: Sequence[Observation]
 ) -> IngestSummary:
@@ -31,14 +44,7 @@ def ingest_observations(
             store.insert_telemetry(sample)
         for obs in observations:
             store.insert_observation(obs)
-    return IngestSummary(
-        scenario=name,
-        frames=len(observations),
-        observations=len(observations),
-        objects=sum(len(o.detected_objects) for o in observations),
-        telemetry_samples=len(telemetry),
-        stale_associations=sum(1 for o in observations if o.telemetry and o.telemetry.stale),
-    )
+    return summarize_ingest(name, telemetry, observations)
 
 
 def ingest_result(store: Store, result: SimulationResult) -> IngestSummary:

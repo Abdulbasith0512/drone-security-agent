@@ -19,21 +19,18 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from drone_agent.agents.context import ContextEngine, ContextUpdate
 from drone_agent.agents.perception import PerceptionAgent, PerceptionTrace
-from drone_agent.agents.reasoning import SecurityReasoner
 from drone_agent.agents.sampling import AdaptiveSampler, SamplerConfig, SamplingReason
-from drone_agent.models import Alert, Entity, Event, Observation, Telemetry
+from drone_agent.models import Observation
 from drone_agent.pipeline.config import EventConfig
 from drone_agent.rules.config import SecurityRulesConfig
-from drone_agent.rules.lifecycle import AlertChange
+from drone_agent.runtime.consumer import ObservationPipeline
 from drone_agent.runtime.events import RunEvent, RunEventKind
 from drone_agent.runtime.pacing import Pacer
 from drone_agent.runtime.scene import SIGNAL_NAME, Signature, scene_score, signature
 from drone_agent.runtime.ticks import Tick, build_ticks
 from drone_agent.scenario import Scenario
 from drone_agent.store import Store
-from drone_agent.telemetry import TelemetrySynchronizer
 from drone_agent.vision import FrameInput, ScriptedProvider
 
 Listener = Callable[[RunEvent], None]
@@ -128,18 +125,23 @@ class PatrolEngine:
             spec_sha256 or hashlib.sha256(scenario.model_dump_json().encode()).hexdigest()
         )
         self.sampler = AdaptiveSampler(self.options.sampler)
-        self.context = ContextEngine(self.options.events)
-        self.reasoner = SecurityReasoner(self.options.rules)
+        # Everything downstream of perception is the shared consumer (runtime/consumer.py): the
+        # same object the progressive video driver feeds. The engine only decides WHICH frames are
+        # analysed and what an observation for a skipped frame is.
+        self.pipeline = ObservationPipeline(
+            store,
+            events=self.options.events,
+            rules=self.options.rules,
+            stale_after_s=scenario.telemetry.stale_after_s,
+            emit=self._emit,
+        )
+        self.context = self.pipeline.context
+        self.reasoner = self.pipeline.reasoner
 
-        self._samples: list[Telemetry] = []
-        self._events: list[Event] = []
-        self._entities: list[Entity] = []
-        self._known_events: dict[str, str] = {}
         self._last_obs: Observation | None = None
         self._reference: Signature | None = None
         self._last_offset = 0.0
         self._trace: list[dict] = []
-        self._provenance: dict[str, int] = {}
         # counters
         self.n_ticks = 0
         self.n_scheduled = 0
@@ -147,7 +149,10 @@ class PatrolEngine:
         self.n_model_calls = 0
         self.n_carried = 0
         self.n_dropped = 0
-        self.n_observations = 0
+
+    @property
+    def n_observations(self) -> int:
+        return self.pipeline.n_observations
 
     # ---- public ----------------------------------------------------------------------------
     def run(self) -> RunSummary:
@@ -188,7 +193,7 @@ class PatrolEngine:
                 else:
                     self._on_frame(tick)
         with store.transaction():
-            self._finish(last_at)
+            self.pipeline.finish(last_at, self._last_offset)
         summary = self._summarise(last_at, time.perf_counter() - started, run_id)
         store.update_agent_run(
             run_id,
@@ -205,8 +210,7 @@ class PatrolEngine:
         self.n_scheduled += 1
         sample = tick.sample
         if sample is not None:
-            self.store.insert_telemetry(sample)
-            self._samples.append(sample)
+            self.pipeline.record_telemetry(sample)
         self._emit(
             RunEventKind.TELEMETRY,
             tick.at,
@@ -226,13 +230,13 @@ class PatrolEngine:
                 else {}
             ),
         )
-        self._assess(tick.at, tick.offset_s, camera=False)
+        self.pipeline.assess(tick.at, tick.offset_s, camera=False)
 
     def _on_frame(self, tick: Tick) -> None:
         frame = tick.frame
         assert frame is not None
         self.n_frames += 1
-        sync = TelemetrySynchronizer(self._samples, self.scenario.telemetry.stale_after_s)
+        sync = self.pipeline.synchronizer()
         association = sync.associate(tick.at)
         current = signature(frame)
         score = scene_score(self._reference, current)
@@ -241,7 +245,7 @@ class PatrolEngine:
             zone=frame.zone,
             scene_score=score,
             telemetry=association.telemetry if association else None,
-            open_events=sum(1 for e in self._events if e.is_open),
+            open_events=sum(1 for e in self.pipeline.events if e.is_open),
         )
         analyze = decision.analyze
         reason, detail = decision.reason.value, decision.detail
@@ -304,106 +308,11 @@ class PatrolEngine:
         if obs is None:
             return  # nothing new was seen, so no camera rule can change
 
-        obs = sync.attach(obs)
-        self.store.insert_observation(obs)
-        self.n_observations += 1
-        label = (obs.provenance.value.upper() if obs.provenance else "UNKNOWN") + (
-            "+CARRIED" if obs.source.endswith("+carried") else ""
-        )
-        self._provenance[label] = self._provenance.get(label, 0) + 1
-        self._emit(
-            RunEventKind.OBSERVATION,
-            tick.at,
-            tick.offset_s,
-            provenance=label,
-            frame_id=obs.frame_id,
-            description=obs.description,
-            objects=[
-                {
-                    "type": o.object_type.value,
-                    "activity": o.activity,
-                    "attributes": o.attributes,
-                    "confidence": o.confidence,
-                }
-                for o in obs.detected_objects
-            ],
-            carried=obs.source.endswith("+carried"),
-        )
-        self._apply_context(self.context.process(obs), tick)
-        self._assess(tick.at, tick.offset_s, safety=False)
-
-    # ---- context, rules, persistence -------------------------------------------------------------
-    def _apply_context(self, update: ContextUpdate, tick: Tick) -> None:
-        self._events, self._entities = update.events, update.entities
-        if update.changed:
-            self.store.save_events(update.changed)
-        self.store.save_entities(update.entities)
-        for ev in update.changed:
-            status = "open" if ev.is_open else "closed"
-            previous = self._known_events.get(ev.event_id)
-            self._known_events[ev.event_id] = status
-            if previous == "closed":
-                continue
-            change = "opened" if previous is None else ("closed" if status == "closed" else "grew")
-            self._emit(
-                RunEventKind.EVENT,
-                tick.at,
-                tick.offset_s,
-                event_id=ev.event_id,
-                change=change,
-                object_type=ev.object_type.value,
-                zone=ev.zone.value,
-                first_seen=ev.first_seen.isoformat(),
-                last_seen=ev.last_seen.isoformat(),
-                duration_s=ev.duration_seconds,
-                observations=ev.evidence_count,
-                close_reason=ev.close_reason.value,
-                entity_id=ev.entity_id,
-                attributes=ev.attributes,
-            )
-
-    def _assess(
-        self, now: datetime, offset_s: float, *, camera: bool = True, safety: bool = True
-    ) -> None:
-        changes = self.reasoner.assess(
-            self._events, self._entities, self._samples, now, camera=camera, safety=safety
-        )
-        for change in changes:
-            self.store.save_alert(change.alert)
-            self._announce(change, now, offset_s)
-
-    def _announce(self, change: AlertChange, now: datetime, offset_s: float) -> None:
-        alert: Alert = change.alert
-        for step in change.transitions or [None]:
-            self._emit(
-                RunEventKind.ALERT,
-                now,
-                offset_s,
-                alert_id=alert.alert_id,
-                rule_id=alert.rule_id,
-                title=alert.title,
-                severity=alert.severity.value,
-                status=alert.status.value,
-                verdict=alert.verdict.value if alert.verdict else None,
-                zone=alert.zone.value if alert.zone else None,
-                transition=step.kind.value if step else "evidence",
-                reason=step.reason if step else "new evidence",
-                recommended_action=alert.recommended_action,
-                confidence=alert.confidence,
-                detection_latency_s=alert.detection_latency_seconds,
-                event_ids=alert.event_ids,
-                is_new=change.is_new,
-            )
-
-    def _finish(self, last_at: datetime) -> None:
-        """The patrol ended: close open events and take a final look with every rule."""
-        update = self.context.flush()
-        self._apply_context(update, Tick("telemetry", self._last_offset, last_at))
-        self._assess(last_at, self._last_offset)
+        self.pipeline.consume(obs, tick.at, tick.offset_s)
 
     # ---- summary ---------------------------------------------------------------------------
     def _summarise(self, sim_end: datetime, wall: float, run_id: int) -> RunSummary:
-        alerts = self.reasoner.alerts
+        alerts = self.pipeline.alerts
         by_status: dict[str, int] = {}
         by_severity: dict[str, int] = {}
         for a in alerts:
@@ -418,15 +327,15 @@ class PatrolEngine:
             sim_end=sim_end,
             ticks=self.n_ticks,
             telemetry_scheduled=self.n_scheduled,
-            telemetry_delivered=len(self._samples),
+            telemetry_delivered=len(self.pipeline.samples),
             frames=frames,
             model_calls=self.n_model_calls,
             skipped=self.n_carried,
             dropped=self.n_dropped,
             avoided_pct=avoided,
             observations=self.n_observations,
-            events=len(self._events),
-            entities=len(self._entities),
+            events=len(self.pipeline.events),
+            entities=len(self.pipeline.entities),
             alerts=len(alerts),
             alerts_by_status=dict(sorted(by_status.items())),
             alerts_by_severity=dict(sorted(by_severity.items())),
@@ -437,7 +346,7 @@ class PatrolEngine:
             },
             sampler=self.sampler.stats.to_dict(),
             perception=self.perception.stats.to_dict(),
-            provenance=dict(sorted(self._provenance.items())),
+            provenance=dict(sorted(self.pipeline.provenance.items())),
             wall_seconds=wall,
             run_id=run_id,
         )

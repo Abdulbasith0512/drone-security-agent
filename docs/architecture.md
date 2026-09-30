@@ -1,36 +1,56 @@
-# Architecture (MVP)
+# Architecture
 
 Principle: **FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING.** Frames are never judged in isolation.
+**Rules decide; the LLM only explains.**
 
+This document is organised by layer. Each layer section keeps its original design rationale and says which
+milestone introduced it; the diagram and tables below describe the CURRENT implementation.
+
+## Current architecture
 ```mermaid
 flowchart TD
-    S[Scenario YAML / Video file] --> P[VisionProvider]
-    T[Telemetry simulator] --> J[Telemetry sync: nearest-prior join]
-    P --> O[Observation]
-    J --> O
-    O --> DB[(SQLite index: frames, telemetry, observations, FTS5)]
-    DB --> A[Event Aggregator]
-    A --> M[Entity Memory]
-    A --> R[Deterministic Rule Engine]
-    M --> R
-    R --> AL[Alerts with evidence IDs]
-    DB --> Q[Analyst Q&A / Summary]
-    AL --> Q
+    SC["Scenario YAML (scripted text frames)"] --> SP["ScriptedProvider"]
+    VD["Video file"] --> VS["VideoSource + time-based sampler"]
+    VS --> GT["Frame-change gate (pixel difference)"]
+    GT -->|accepted| DP["DescriberProvider"]
+    DP --> FD{{"FrameDescriber: Gemini (optional) or cassette replay"}}
+    GT -->|"skipped: carried forward"| OB
+    TL["Simulated telemetry / timeline"] --> SY["Nearest-prior telemetry sync"]
+    SP --> OB["Observation + detected objects"]
+    FD --> OB
+    SY --> OB
+    OB --> DB[("SQLite: frames, telemetry, observations, FTS5")]
+    DB --> AG["EventAggregator"]
+    AG --> EV[("events")]
+    EV --> EL["EntityLinker: coarse similar-vehicle groups"]
+    EL --> EN[("entities")]
+    EV --> RE["Rule engine: 4 deterministic rules"]
+    EN --> RE
+    RE --> AL[("alerts with evidence ids")]
+    DB --> TO["Read-only bounded analyst tools"]
+    EV --> TO
+    EN --> TO
+    AL --> TO
+    TO --> AN["Analyst: offline template, or LangChain + Gemini (optional)"]
+    AN --> CG["Citation gate: ids exist and were retrieved, one retry, template fallback"]
+    CG --> ANS["Cited answer / run summary"]
+    EV -.-> EVAL["Evaluation harness (drone_agent/eval, offline)"]
 ```
 
 ## Stages
 | Stage | Responsibility | Milestone |
 |---|---|---|
-| Scenario / Video | Text-frame scenarios (`ScriptedProvider`) or real video sampled with OpenCV (frame-diff gate skips near-identical frames) | M1, M5 |
-| VisionProvider | Interface: frame in, validated observation drafts out. Providers: scripted, mock/cassette (replay cached responses, no key needed), real VLM later | M1, M5 |
-| Telemetry sync | Telemetry samples (ts, position, altitude, battery, mode, zone) are joined to each frame by nearest-prior timestamp; the frame inherits `zone` and a wall-clock time from the simulated clock. Frames with no recent telemetry get a `stale_telemetry` flag | M1 |
-| Observation | One detected object in one frame: class, attributes (colour, body type, description), zone, ts, frame_id, confidence, derived coarse `signature` | M1 |
-| SQLite index | `frames`, `telemetry`, `observations` (the frame-by-frame index), later `events`, `entities`, `alerts`; FTS5 for keyword search; SQL filters by time/class/zone | M2 |
-| Event Aggregator | Same class + zone + compatible attributes with a gap within tolerance extends one event (first_seen, last_seen, duration). Tolerance absorbs missed detections. No LLM involved | M3 |
-| Entity Memory | At event close, same-signature entity with a sufficient revisit gap increments `visit_count` (e.g. blue pickup at 12:00 and 17:00) | M3 |
-| Rule Engine | Deterministic rules with YAML thresholds, evaluated on every event update: loitering, after-hours presence, repeat vehicle, restricted-zone entry. Dedupe key and escalation | M4 |
-| Alerts | Severity, message, evidence (event_ids, frame_ids) | M4 |
-| Analyst Q&A / Summary | LangChain tool-calling over SQLite. Answers cite IDs; a verifier rejects unknown IDs; template fallback with no LLM. LangChain is confined to `drone_agent/agent` | M6 |
+| Scenario / Video | Scripted text-frame scenarios (`ScriptedProvider`), or a real video decoded with OpenCV, sampled every N seconds and gated by a pixel-difference check that skips near-identical frames | M1, M5A |
+| VisionProvider / FrameDescriber | `VisionProvider.analyze(frame) -> Observation` is the boundary the pipeline uses; a real model implements the smaller `FrameDescriber.describe(frame) -> ProviderOutput`. Providers: scripted, cassette (record/replay, no key needed) and Gemini (optional, official SDK) | M1, M5A, M5B |
+| Telemetry sync | Telemetry samples (timestamp, position, altitude, battery, zone) are joined to each frame by nearest-prior timestamp; the frame inherits its zone and a wall-clock time from the simulated clock. Telemetry older than a threshold is flagged stale (`telemetry_stale`). Telemetry is SIMULATED | M1 |
+| Observation | One frame's description plus its detected objects (type, activity, coarse attributes, confidence), with zone, timestamp, frame id, source and telemetry association | M1 |
+| SQLite index | `frames`, `telemetry`, `observations`, `detected_objects` (the frame-by-frame index) with an FTS5 keyword index, plus derived `events`, `entities` and `alerts`; SQL filters by time, class and zone | M2-M4 |
+| Event Aggregator | Detections with the same object type and zone, compatible stable attributes and a gap within tolerance extend one event (first_seen, last_seen, duration); missed detections are tolerated up to a configured number of frames. Temporal association, not tracking. No LLM | M3 |
+| Entity Memory | `EntityLinker` groups separate VEHICLE events whose normalised colour and body type are equal (or that share an explicit plate) into coarse "similar vehicle" entities. People are never linked, and a coarse link never claims physical identity | M3 |
+| Rule Engine | Deterministic rules with YAML thresholds run over stored events and entities: loitering, after-hours presence, repeat vehicle, restricted-zone entry. Alert ids are deterministic and de-duplicated on (rule, subject); severity is fixed per rule (no escalation) | M4 |
+| Alerts | Severity, reason, the numbers the rule compared, and evidence (event ids, entity id, frame ids) | M4 |
+| Analyst Q&A / Summary | Read-only bounded tools over the store, an offline template analyst and an optional LangChain + Gemini tool loop. Answers cite stored ids; a citation gate checks that every id exists and was retrieved, allows one correction retry, then falls back to the template answer. Truncation is stated, never silent. LangChain is confined to `drone_agent/agent/llm.py` | M6, M8a |
+| Evaluation harness | Offline, deterministic experiments (gate, compression, flicker, entity memory, rules, citation suite, semantic probe, scale) and their ablation table; no production code depends on it (only the `evaluate` CLI command loads it) | M7 |
 
 ## Trust boundary
 Rules decide; the LLM explains and answers from tool output only.
@@ -38,13 +58,15 @@ Rules decide; the LLM explains and answers from tool output only.
 ## Package layout
 ```
 drone_agent/
-  models/ telemetry/ vision/ store/ pipeline/ rules/ agent/   # agent/ is the only place langchain is imported
-config/events.yaml  config/security_rules.yaml            # M3 event thresholds, M4 rule config
-  (video/ and vision/ hold the M5A real-video pipeline and provider contract)
-scenarios/  tests/  bench/  docs/
+  models/ telemetry/ vision/ video/ store/ pipeline/ rules/ agent/ eval/
+  __main__.py (CLI)  scenario.py  simulate.py  ingest.py  clock.py
+config/events.yaml  config/security_rules.yaml            # event thresholds, rule thresholds
+scenarios/  tests/  docs/
+output/                                                    # generated databases, cassettes, results (gitignored)
 ```
-Dependency direction: `agent` -> `store`; `rules` -> `models`; core packages never import `agent`.
-`tests/test_scaffold.py` enforces that the core does not import LangChain.
+Dependency direction: `agent` -> `store`; `rules` -> `models`; `eval` imports the production pipeline, rules and analyst gate but no pipeline, rules, store or analyst code imports `eval`; only the CLI's `evaluate` command loads it (lazily).
+The core packages (`video`, `vision`, `pipeline`, `rules`, `store`, `models`, `telemetry`) never import `agent` or `eval`, and only `drone_agent/agent/llm.py`
+imports LangChain (`tests/test_scaffold.py` and `tests/test_agent_llm.py` enforce this).
 
 ---
 
@@ -271,7 +293,7 @@ FRAME -> OBSERVATION -> EVENT -> ENTITY MEMORY -> DETERMINISTIC SECURITY RULES -
 whether an alert exists; the alert carries the numbers the rule compared and links back to the events and frames
 behind it. No LLM is called, and none may create, suppress, escalate or change an alert. The system does not
 "detect threats with AI"; it flags patterns (dwell time, time of day, repetition, zone) that a person configured as
-worth attention, on top of noisy VLM descriptions. A later LLM layer (M6) may only *explain* alerts.
+worth attention, on top of noisy VLM descriptions. The analyst layer (M6) may only *explain* alerts.
 
 ## The four rules (defaults from `config/security_rules.yaml`)
 | Rule | Fires when | Default configuration | Severity | Alert id |
@@ -409,7 +431,7 @@ overclaim check is a narrow phrase list, not semantic. The template analyst is b
 covers outages, not subtle misstatements. Evidence quality is bounded by the vision model (M5B) and by simulated telemetry.
 
 ## Evaluation harness (M7, `drone_agent/eval/`)
-An evaluation-only package: it imports the production pipeline, rules and analyst gate but nothing in production imports it, and it makes no network or API call. `runner.run_all` executes the experiments
+An evaluation-only package: it imports the production pipeline, rules and analyst gate but no pipeline, rules, store or analyst code imports it (only the CLI's `evaluate` command loads it, lazily), and it makes no network or API call. `runner.run_all` executes the experiments
 (`gate_exp`, `pipeline_exp` for compression/flicker/entity memory, `rules_exp`, `grounding_exp` for the citation suite and the semantic-faithfulness probe, optional `scale`), derives the ablation table from
 their results, and writes `results.json`, `results.csv`, `ablation_table.csv` and `summary.md`. `claims.py` is a prototype structured claim-evidence checker that lives ONLY in the evaluation layer. Ablations are done
 inside the harness (`entities=[]`, a different `max_missed_frames`, gate threshold 0) so production behaviour is untouched. See docs/evaluation.md for definitions, results and threats to validity.
@@ -423,15 +445,15 @@ False negatives: a person who moves between zones, or is missed for longer than 
 events that may each stay below the loitering threshold; a single sighting has duration 0; vehicles at night do not raise
 an after-hours alert by default (add `vehicle` to `object_types`, at the cost of noise); a vehicle whose colour the VLM
 reports inconsistently splits into two entities and may miss the repeat threshold; nothing is seen while the drone is
-elsewhere. Thresholds are hand-set on two scripted scenarios and are not validated on real footage.
+elsewhere. Thresholds are hand-set on two scripted scenarios (the 21 labelled synthetic scenarios added in M7 check them, but are also synthetic) and are not validated on real security footage.
 
 ---
 
-# Real video ingestion (M5A: provider-neutral pipeline + cassette replay)
+# Real video ingestion (M5A provider-neutral pipeline + cassette replay; M5B Gemini provider)
 
 Implemented in `drone_agent/video/` (source, sampling, gate, timeline, ingest, synthetic) and `drone_agent/vision/`
-(`base.py`, `contract.py`, `cassette.py`). **No real vision model is implemented yet**; that is M5B. This milestone builds
-everything around it so that adding one is a small, isolated step.
+(`base.py`, `contract.py`, `cassette.py`, `gemini.py`). M5A built everything around a provider contract; M5B ("Gemini provider" below)
+added the Gemini provider as one small, isolated step behind it.
 
 ```
 video file ─► VideoSource (validated) ─► sampling (every N s) ─► frame-change gate ─► VisionProvider ─► Observation
@@ -443,10 +465,10 @@ SIMULATED timeline (start time + patrol zones) ─► simulated telemetry ─►
 ```
 
 ## Scripted versus real-video ingestion
-| | `ingest <scenario.yaml>` (M1-M4) | `ingest-video <video>` (M5A) |
+| | `ingest <scenario.yaml>` (M1-M4) | `ingest-video <video>` (M5A, M5B) |
 |---|---|---|
 | Frames | text lines in YAML | frames decoded from a real video file with OpenCV |
-| Descriptions | scripted | a provider's output (today: a cassette replay) |
+| Descriptions | scripted | a provider's output (Gemini, or a cassette replay) |
 | Zone / time / telemetry | from the scenario | from a SIMULATED timeline (see below) |
 | Output of the front end | `Observation`, `Telemetry` | the same `Observation`, `Telemetry` |
 | Everything downstream | identical: `Store`, `build-events`, `analyze` never learn which one produced the data |
@@ -454,8 +476,8 @@ SIMULATED timeline (start time + patrol zones) ─► simulated telemetry ─►
 ## What is real and what is simulated
 **Real:** the video file, its decoding, the sampled frames and their pixels, the frame-change gate scores, the frame
 identity hashes, and the vision model's descriptions when `--provider gemini` is used. **Simulated:** the drone telemetry (a demo video
-carries none), the zone each frame is assigned to, and the wall-clock time of each frame. **Canned:** the only cassette
-in the repository comes from `make-demo-video` and its descriptions are written by that tool, not by a vision model; the
+carries none), the zone each frame is assigned to, and the wall-clock time of each frame. **Canned:** the demo cassette
+generated by `make-demo-video` (never committed) holds descriptions written by that tool, not by a vision model; the
 cassette says so in its `provider` field and the CLI prints it.
 
 ## Video source (`video/source.py`)
@@ -487,7 +509,7 @@ one, means slow drift eventually gets through. Each decision records `(accepted,
 `first`, `changed`, `similar` or `gate_disabled`. **This is not motion detection or object tracking**; it knows nothing
 about content, only that pixels changed. The default threshold is an uncalibrated starting point: on the synthetic video,
 identical frames score exactly 0.0 and real scene changes score 13-26, so anything between works there; real footage
-(sensor noise, compression, lighting) needs calibration in M5B.
+(sensor noise, compression, lighting) needs calibration; the M7 gate experiment measured misses of small changes at the default threshold (docs/evaluation.md).
 
 **Skipped frames and events (important).** A skipped frame produces no model call. But the event aggregator treats time
 without observations as an unobserved gap, so a person standing still in an unchanged scene would be cut into several
@@ -546,8 +568,8 @@ because decoders can differ slightly. A cassette recorded for another video is r
 **Modes** (`CassetteDescriber`): `replay` answers from the cassette and a missing frame is a clear `CassetteMiss` (the inner
 provider is never called); `record` answers from the cassette when it can, otherwise calls the inner describer, stores the
 response and `flush()` writes the file deterministically (sorted, stable formatting); `live` always calls the inner describer
-and ignores the cassette. Replay is what the CLI exposes and what runs against real data now; record and live are implemented
-and unit-tested with a fake describer, but no real model call exists.
+and ignores the cassette. The CLI exposes all three (`--cassette-mode replay|record|live`); record and live drive the Gemini describer (M5B, below) and are
+unit-tested with a fake client, while replay needs no key and makes no API call.
 
 ## Simulated telemetry for video (`video/timeline.py`)
 A `VideoTimeline` is a SIMULATED start datetime plus the same patrol configuration as scenarios. `--start` and `--zone` make a
@@ -563,8 +585,9 @@ tests (session fixture) or by `make-demo-video` into the gitignored `output/`; n
 gives 10 samples of which the gate accepts 4 (frames 0, 40, 120, 160) and skips 6.
 
 ## CLI
-`ingest-video VIDEO --db DB --provider cassette --cassette FILE [--sample-every S] [--no-gate] [--gate-threshold T]
-[--gate-resize WxH] [--skipped carry|drop] [--start ISO --zone Z | --timeline YAML] [--verbose]`, and
+`ingest-video VIDEO --db DB [--provider cassette|gemini] [--cassette FILE] [--cassette-mode replay|record|live] [--model M]
+[--sample-every S] [--no-gate] [--gate-threshold T] [--gate-resize WxH] [--skipped carry|drop] [--start ISO --zone Z | --timeline YAML]
+[--max-dimension N] [--jpeg-quality Q] [--default-confidence C] [--verbose]`, `describe-frame VIDEO --time S` (one Gemini call, stores nothing) and
 `make-demo-video [--out-dir DIR]`. The summary reports video duration, original frames, sample candidates (decoded / failed / beyond
 end), gate accepted and skipped, provider calls and cassette replays, observations and objects written, simulated telemetry samples and
 stale associations. It does NOT build events or alerts; run `build-events` and `analyze` next. The whole pipeline runs before the
@@ -603,6 +626,6 @@ One class implementing `FrameDescriber`: `name: str` and `describe(frame: FrameI
   authentication errors fail immediately with a clear message. The API key comes only from an environment variable and is never written to
   a cassette, log or database.
 * **Wiring:** `DescriberProvider(CassetteDescriber(cassette, CassetteMode.RECORD, inner=MyVlm(), path=...))` records on first use and replays
-  afterwards; `ingest-video` needs a `--provider <name>` choice and `--cassette-mode replay|record|live`. `flush()` must run even if a frame fails
+  afterwards; `ingest-video` exposes `--provider` and `--cassette-mode replay|record|live`. `flush()` must run even if a frame fails
   midway so paid responses are not lost.
 * **Not needed:** any change to sampling, the gate, the store, events, entities or rules.

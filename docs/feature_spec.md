@@ -20,8 +20,8 @@ patrol. Owners get automated monitoring, faster response to real threats, and ev
    citing evidence IDs and refusing to invent unsupported facts.
 
 ## Assumptions
-- One fixed property, one drone, one patrol per run; zones (gate, garage, driveway, perimeter) come
-  from a config file.
+- One fixed property, one drone, one patrol per run. The property has five zones: `main_gate`, `driveway`,
+  `parking_area`, `warehouse` and `restricted_zone`; a scenario or timeline YAML assigns a zone to each patrol leg.
 - An object's zone is the drone's telemetry zone at frame time (the camera faces where the drone is).
 - Video timestamps are mapped onto a simulated wall clock so time-of-day rules (midnight) work on any clip.
 - VLM output is noisy. Vehicle make/model is low-confidence; matching uses coarse attributes
@@ -30,7 +30,7 @@ patrol. Owners get automated monitoring, faster response to real threats, and ev
 - Simulated text-frame scenarios are the deterministic ground truth for tests; real video is
   processed through the same `VisionProvider` interface.
 - The prototype is offline/replay ("real-time" = streaming ingest on a simulated clock).
-- No API access is assumed; the real VLM/LLM provider is chosen later (M5/M6). Keys come from environment variables only.
+- No API access is assumed: the core pipeline, the tests and the offline demos need no key. Gemini (official SDK) is an optional real vision model and analyst backend; keys come from environment variables (or a local gitignored `.env`) only.
 
 ## MVP scope
 - Simulated frames + telemetry -> Observation -> SQLite index -> temporal Events -> coarse entity memory.

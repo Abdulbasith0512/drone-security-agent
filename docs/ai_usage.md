@@ -3,6 +3,41 @@
 Honest record of where AI tools were used, what I changed or rejected, and how each result was
 validated. Updated at the end of every milestone.
 
+## Current status summary (M0-M8b)
+**Author:** Abdul Basith Syed.
+
+**Development tool:** Claude Code (Claude Sonnet 5.5) generated the code, tests, evaluation harness and documentation from my milestone specifications.
+Work proceeded one milestone at a time, each committed separately (commits listed below), and each entry records what was generated, the design decisions and how the result
+was validated. My contribution was the requirements and scope cuts, the design decisions recorded in each entry below, and the corrections I directed. **Runtime models:** Gemini
+(`gemini-3.6-flash` in the recorded runs) is a runtime component (an optional vision model and an optional analyst backend), not a development assistant.
+
+| Milestone | Commit | Subject |
+|---|---|---|
+| M0 | `d1c675d` (`.gitignore` first: `77330a6`) | scaffold, feature spec, architecture plan |
+| M1 | `ce851c9` | domain models, simulated telemetry, scripted provider, scenarios |
+| M2 | `67322ed` | SQLite persistence, FTS5 search, ingest and query CLI |
+| M3 | `f269130` | temporal events and coarse vehicle entity memory |
+| M4 | `fc2c4d3` | deterministic rules and evidence-backed alerts |
+| M5A | `6c70037` | provider-neutral real-video pipeline, frame gate, cassette replay |
+| M5B | `8e7a3c4` | Gemini frame describer, record/replay wiring |
+| M6 | `3883630` | grounded analyst with validated evidence citations |
+| M7 | `560c7c3` (tag `m7-final-baseline`) | evaluation, ablations and grounding analysis |
+| M8a | `0ae7414` | explicit truncation in the offline analyst |
+| M8b | `7589c2c` | real-video experiment documentation |
+
+**How AI output was validated** (details in each entry): offline deterministic tests (the SDK boundary is mocked; no test needs a key), mutation checks that break the
+code to confirm the tests notice, real runs of Gemini only as separate, individually approved steps, and honest problem logs. **Decisions and corrections recorded below** include:
+rejecting plan revisions until my scope cuts were reflected (M0), choosing carry-forward for gate-skipped frames (M5A), reporting the gate and citation-suite results without tuning them (M7),
+and fixing two citation-validator behaviours after review while stating that this makes the suite's accuracy non-independent (M7).
+
+**Accidental live Gemini verification during M8d.** While checking the README's demo commands I ran two Gemini-backed commands, one analyst query (`ask --provider gemini`) and one
+frame-description operation (`describe-frame`), intending to confirm the missing-key error message. The locally configured `.env` supplied a key, so they executed as live calls.
+The exact number of API requests is unknown and was not recorded. Neither operation writes output; no tracked repository file and no real-video artifact was modified by them, and
+no further live calls were made. They were an accidental verification of the error path, not part of a new experiment, and no result from them is used anywhere in this project.
+
+**Not claimed anywhere in this project:** perception accuracy on real video, security-detection performance in the field, that a coarse vehicle match proves physical identity, that
+citation validation establishes semantic entailment, or reliability from the few live Gemini runs.
+
 ## M0: Assignment analysis and architecture planning
 **Tool:** Claude Code (Claude Sonnet 5.5), used in plan mode before any code.
 
@@ -307,7 +342,7 @@ persistent vehicle tracking; it performs coarse attribute-based vehicle grouping
 (e.g. "a blue pickup" without "similar"). I deliberately did not add a one-off phrase ban for "vehicle tracking": that would be brittle and would hide the general issue. M7 should measure it.
 
 ## M7: Evaluation, ablation and grounding-faithfulness harness
-**Tool:** Claude Code (Claude Sonnet 5.5), from my M7 spec. NOT committed at the time of writing; no live API call was made.
+**Tool:** Claude Code (Claude Sonnet 5.5), from my M7 spec. No live API call was made.
 
 **What the AI generated:** the `drone_agent/eval/` package (generated frame-gate fixture, pipeline and rule experiments, citation adversarial suite, semantic-faithfulness probe, eval-only structured claim checker,
 scale benchmark, runner with an ablation table and JSON/CSV/Markdown output), the `evaluate` command, `docs/evaluation.md` and offline tests (31 for the harness plus 22 regression test cases for the two validator fixes; 509 in total).

@@ -101,6 +101,10 @@ tr.sel, .sel { background: var(--accent-soft) !important; }
 .badge.sev { color: var(--c); }
 .badge.type-person { color: var(--person); } .badge.type-vehicle { color: var(--vehicle); } .badge.type-other { color: var(--other); }
 .badge.sim { color: var(--muted); border-style: dotted; }
+.badge.status { color: var(--muted); text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; }
+.badge.status-open, .badge.status-escalated { color: var(--sev-high); }
+.badge.status-resolved { color: var(--fresh); }
+.badge.status-acknowledged { color: var(--accent); }
 .chip { display: inline-block; margin: 1px 4px 1px 0; padding: 1px 8px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--surface2); font-family: var(--mono); font-size: 12px; cursor: pointer; color: var(--accent); }
 .chip:hover { border-color: var(--accent); }

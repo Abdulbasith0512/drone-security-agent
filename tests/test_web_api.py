@@ -3,6 +3,7 @@
 import hashlib
 import json
 import socket
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ import pytest
 from conftest import ROOT
 
 from drone_agent.agent.citations import extract_citations
-from drone_agent.models import Severity
+from drone_agent.models import Severity, Zone
 from drone_agent.rules import load_rules_config
 from drone_agent.store import Store, StoreError
 from drone_agent.web.api import (
@@ -54,14 +55,19 @@ def fingerprint(path: Path) -> str:
 
 
 # ---- runs and overview -----------------------------------------------------------------------
-def test_runs_list_the_declared_kind_and_headline_counts(api):
+def test_runs_list_the_declared_kind_and_headline_counts(api, runs):
     listing = {r["name"]: r for r in api.runs()["runs"]}
     assert listing[SCRIPTED]["label"] == "SCRIPTED" and not listing[SCRIPTED]["has_video"]
     assert listing[VIDEO]["label"] == "SYNTHETIC DEMO" and listing[VIDEO]["has_video"]
     assert listing[VIDEO]["video"]["frame_count"] == 200 and listing[VIDEO]["video"]["fps"] == 10.0
-    assert listing[SCRIPTED]["counts"] == {
-        "observations": 27, "events": 7, "entities": 2, "alerts": 6
-    }  # fmt: skip
+    with Store.open(runs[0].db) as s:
+        assert listing[SCRIPTED]["counts"] == {
+            "observations": s.count_observations(),
+            "events": s.count_events(),
+            "entities": s.count_entities(),
+            "alerts": s.count_alerts(),
+        }
+    assert listing[SCRIPTED]["counts"]["observations"] == 27
 
 
 def test_the_overview_equals_the_existing_backends_numbers(api, scripted_store):
@@ -88,12 +94,15 @@ def test_the_overview_equals_the_existing_backends_numbers(api, scripted_store):
     assert ov["limitations"] and "simulated" in ov["limitations"][0]
 
 
-def test_the_pipeline_strip_is_the_documented_six_stages_with_backend_counts(api):
+def test_the_pipeline_strip_is_the_documented_six_stages_with_backend_counts(api, runs):
     stages = api.overview(SCRIPTED)["pipeline"]
     assert [s["key"] for s in stages] == [
         "observations", "events", "entities", "rules", "alerts", "analyst"
     ]  # fmt: skip
-    assert [s["count"] for s in stages] == [27, 7, 2, 4, 6, None]
+    enabled = sum(1 for r in load_rules_config().model_dump().values() if r["enabled"])
+    with Store.open(runs[0].db) as s:
+        expected = [27, s.count_events(), s.count_entities(), enabled, s.count_alerts(), None]
+    assert [s["count"] for s in stages] == expected
     assert all(s["panel"].startswith("panel-") for s in stages)
 
 
@@ -116,8 +125,13 @@ def test_the_rules_are_the_backends_own_configuration_not_a_copy(api):
     rules = {r["id"]: r for r in api.rules()["rules"]}
     config = load_rules_config()
     assert set(rules) == set(config.model_dump())
-    assert rules["loitering"]["settings"]["zones"]["main_gate"]["threshold_seconds"] == 300
-    assert rules["repeat_vehicle"]["settings"]["minimum_appearances"] == 3
+    zone = config.loitering.zones[Zone.MAIN_GATE]
+    shown = rules["loitering"]["settings"]["zones"]["main_gate"]["threshold_seconds"]
+    assert shown == float(zone.threshold_seconds)
+    assert rules["repeat_vehicle"]["settings"]["minimum_appearances"] == (
+        config.repeat_vehicle.minimum_appearances
+    )
+    assert all(r["enabled"] == getattr(config, name).enabled for name, r in rules.items())
 
 
 # ---- events, entities, alerts -----------------------------------------------------------------
@@ -346,7 +360,9 @@ def test_databases_are_opened_read_only_so_a_write_cannot_succeed(runs):
             store._conn.execute("DELETE FROM alerts")
         with pytest.raises(Exception, match="readonly"):
             store._conn.execute("INSERT INTO telemetry (ts_utc) VALUES ('x')")
-        assert store.count_alerts() == 6
+        with sqlite3.connect(runs[0].db) as plain:
+            total = plain.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+        assert store.count_alerts() == total
     finally:
         store.close()
 

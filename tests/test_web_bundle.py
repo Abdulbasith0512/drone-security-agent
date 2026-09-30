@@ -118,9 +118,8 @@ def test_the_demo_bundle_builds_the_two_offline_runs(demo):
     assert (video.name, video.kind.key) == ("synthetic_video", "synthetic-demo")
     assert video.video is not None and video.video.is_file()
     with Store.open(scripted.db) as s:
-        assert (s.count_observations(), s.count_events(), s.count_entities(), s.count_alerts()) == (
-            27, 7, 2, 6
-        )  # fmt: skip
+        assert (s.count_observations(), s.count_events(), s.count_entities()) == (27, 7, 2)
+        assert s.count_alerts() >= 6  # the six camera alerts; a newer backend adds safety alerts
         assert set(s.observation_counts_by("source")) == {"scripted"}
     with Store.open(video.db) as s:
         assert (s.count_observations(), s.count_events(), s.count_entities(), s.count_alerts()) == (
@@ -131,13 +130,15 @@ def test_the_demo_bundle_builds_the_two_offline_runs(demo):
 
 def test_the_bundle_reuses_existing_runs_and_rebuilds_on_request(demo):
     out, first = demo
+    with Store.open(first[0].db) as s:  # opening for write may touch the file: read, THEN stamp
+        first_alerts = s.count_alerts()
     stamp = first[0].db.stat().st_mtime_ns
     again = build_demo_runs(out)
     assert again[0].db.stat().st_mtime_ns == stamp  # reused, not rebuilt
     rebuilt = build_demo_runs(out, rebuild=True)
     assert rebuilt[0].db.stat().st_mtime_ns > stamp
     with Store.open(rebuilt[0].db) as s:
-        assert s.count_alerts() == 6  # a rebuild does not double the data
+        assert s.count_alerts() == first_alerts  # a rebuild does not double the data
 
 
 def test_building_the_bundle_never_reads_dotenv_or_touches_the_network(tmp_path, monkeypatch):
@@ -252,7 +253,7 @@ def test_an_outdated_database_is_reported_before_serving(tmp_path):
     conn.close()
     out = Console(record=True, width=120)
     assert web_main.main(["--run", f"old={old},kind=scripted"], out) == 2
-    assert "schema version 1" in out.export_text()
+    assert "schema version 1" in " ".join(out.export_text().split())
 
 
 def test_the_dashboard_sources_stay_inside_the_repo_layout():

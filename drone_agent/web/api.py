@@ -391,16 +391,29 @@ class DashboardApi:
                         ],
                     }
                 )
+            # A backend with telemetry (safety) alerts can also return the drone samples that
+            # crossed the rule's limits; an older backend has no `get_evidence`, so it is optional.
+            get_evidence = getattr(tools, "get_evidence", None)
+            telemetry = (
+                get_evidence(f"alert:{alert_id}").get("telemetry", []) if get_evidence else []
+            )
+        steps = [f"rule '{alert.rule_id}' fired: {alert.message}"]
+        if alert.event_ids:
+            steps.append("evidence: events -> observations -> frames")
+        if telemetry:
+            steps.append(
+                "evidence: simulated drone telemetry samples that crossed the rule's limits"
+            )
+        if not alert.event_ids and not telemetry:
+            steps.append("no camera events or telemetry samples are linked to this alert")
         return {
             "alert": {**found["alert"], "alert_id": alert.alert_id, "frame_ids": alert.frame_ids},
             "facts": [{"name": k, "value": v} for k, v in alert.facts.items()],
             "events": found["events"],
             "entity": found.get("entity"),
             "evidence": evidence,
-            "steps": [
-                f"rule '{alert.rule_id}' fired: {alert.message}",
-                "evidence: events -> observations -> frames",
-            ],
+            "telemetry": telemetry,
+            "steps": steps,
         }
 
     # ---- observations and frames -------------------------------------------------------------

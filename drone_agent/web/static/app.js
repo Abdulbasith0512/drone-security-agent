@@ -76,6 +76,7 @@ function clearError() { $("#error").hidden = true; }
 
 /* ---------- small components ---------- */
 function sevBadge(sev) { return h("span", { class: `badge sev sev-${sev}`, text: sev }); }
+function statusBadge(status) { return h("span", { class: `badge status status-${status}`, text: status }); }
 function typeBadge(t) { return h("span", { class: `badge type-${t}`, text: t }); }
 function chip(ref, label) {
   return h("button", { class: "chip", type: "button", title: `Open ${ref}`, onclick: () => openRef(ref) },
@@ -278,9 +279,13 @@ function renderTimeline() {
 
 function timelineSvg() {
   const events = filteredEvents();
-  const lanes = [...new Set(state.events.events.map((e) => e.zone))];
+  const zoneLanes = [...new Set(state.events.events.map((e) => e.zone))];
+  // alerts raised from drone telemetry have no camera event, so they get their own lane
+  const teleAlerts = (state.zoneFilter || state.typeFilter) ? [] : state.alerts.alerts.filter((a) => !a.event_refs.length);
+  const lanes = teleAlerts.length ? [...zoneLanes, "drone telemetry"] : zoneLanes;
   const span = state.events.span;
-  const t0 = localMs(span.first), t1 = Math.max(localMs(span.last), t0 + 60000);
+  const stamps = teleAlerts.map((a) => localMs(a.triggered_at));
+  const t0 = Math.min(localMs(span.first), ...stamps), t1 = Math.max(localMs(span.last), ...stamps, t0 + 60000);
   const W = 1000, left = 118, right = 16, laneH = 34, top = 8, axis = 26;
   const H = top + lanes.length * laneH + axis;
   const x = (iso) => left + ((localMs(iso) - t0) / (t1 - t0)) * (W - left - right);
@@ -297,6 +302,14 @@ function timelineSvg() {
     root.append(svg("line", { class: "lane", x1: px, x2: px, y1: top, y2: top + lanes.length * laneH }),
       svg("text", { x: px, y: H - 8, "text-anchor": "middle" }, clockLabel(ms, t1 - t0 < 15 * 60000)));
   }
+  teleAlerts.forEach((a) => {
+    const cx = x(a.triggered_at), cy = top + (lanes.length - 1) * laneH + laneH / 2;
+    const m = svg("path", { class: `marker sev-${a.severity}`, d: `M ${cx} ${cy - 8} l 8 8 l -8 8 l -8 -8 z`, tabindex: 0, role: "button",
+      "aria-label": `${a.title}, ${a.severity}` }, svg("title", {}, `${a.ref} (${a.severity}): ${a.title}`));
+    m.addEventListener("click", () => openRef(a.ref));
+    m.addEventListener("keydown", (e) => { if (e.key === "Enter") openRef(a.ref); });
+    root.append(m);
+  });
   for (const ev of events) {
     const lane = lanes.indexOf(ev.zone), y = top + lane * laneH + 6;
     const x0 = x(ev.first_seen), w = Math.max(6, x(ev.last_seen) - x0);
@@ -320,7 +333,7 @@ function timelineSvg() {
 
 function timelineLegend() {
   return h("div", { class: "legend-line" },
-    h("span", {}, "Bars = events (colour = object type). Diamonds = alerts raised on that event, coloured by severity."),
+    h("span", {}, "Bars = events (colour = object type). Diamonds = alerts, coloured by severity: on an event's bar for camera alerts, in the drone telemetry lane for alerts raised from drone data."),
     h("span", {}, typeBadge("person"), " ", typeBadge("vehicle"), " ", typeBadge("other")));
 }
 
@@ -385,7 +398,7 @@ function renderAlerts() {
   const cards = list.map((a) => h("button", { class: `alert-card sev-${a.severity}`, type: "button", "data-alert": a.alert_id,
     onclick: () => selectAlert(a.alert_id) },
     h("div", { class: "t", text: a.title }),
-    h("div", {}, sevBadge(a.severity), " ", h("code", { text: a.rule_id })),
+    h("div", {}, sevBadge(a.severity), " ", a.status ? statusBadge(a.status) : null, " ", h("code", { text: a.rule_id })),
     h("div", { class: "small muted", text: `${pretty(a.zone || "-")} · ${fmtTime(a.triggered_at)}` }),
     h("div", { class: "small mono", text: a.alert_id })));
   const rules = h("details", { class: "rules" }, h("summary", { text: `Security rules in force (${state.rules.rules.length})` }),
@@ -422,11 +435,27 @@ async function selectAlert(id) {
         h("dt", { text: "Severity" }), h("dd", { text: `${a.severity} (fixed by the rule, never chosen by a model)` }),
         h("dt", { text: "Zone" }), h("dd", { text: pretty(a.zone || "-") }),
         h("dt", { text: "Triggered" }), h("dd", { text: fmtTime(a.triggered_at) }),
+        // lifecycle fields exist only on a backend that has them; shown only when present
+        a.status ? [h("dt", { text: "Status" }), h("dd", {}, statusBadge(a.status), a.resolved_at ? ` resolved ${fmtTime(a.resolved_at)}` : "")] : null,
+        a.verdict ? [h("dt", { text: "Verdict" }), h("dd", { text: `${a.verdict}${a.confidence != null ? ` (rule-derived confidence ${Number(a.confidence).toFixed(2)})` : ""}` })] : null,
         h("dt", { text: "Alert ID" }), h("dd", { class: "mono", text: a.alert_id }),
-        h("dt", { text: "Event IDs" }), h("dd", {}, ...a.event_refs.map((r) => chip(r))),
+        h("dt", { text: "Event IDs" }), h("dd", {}, a.event_refs.length ? a.event_refs.map((r) => chip(r)) : "none (raised from drone telemetry)"),
         h("dt", { text: "Vehicle entity" }), h("dd", {}, a.entity_ref ? chip(a.entity_ref) : "none"),
-        h("dt", { text: "Frame IDs" }), h("dd", {}, ...a.frame_ids.map((f) => chip(`frame:${f}`, String(f))))),
+        h("dt", { text: "Frame IDs" }), h("dd", {}, a.frame_ids.length ? a.frame_ids.map((f) => chip(`frame:${f}`, String(f))) : "none")),
+      a.recommended_action ? [h("h3", { text: "Recommended action" }), h("p", {}, a.recommended_action,
+        h("span", { class: "small muted", text: " (a fixed table entry for this rule; not written by a model)" }))] : null,
       h("h3", { text: "Why it was raised" }), h("p", { text: a.reason }),
+      a.ladder && a.ladder.length > 1 ? [h("h3", { text: "Escalation ladder" }),
+        h("p", {}, ...a.ladder.flatMap((s, i) => [i ? " → " : "", sevBadge(s.severity), ` ${fmtTime(s.reached_at)}`]))] : null,
+      a.history && a.history.length ? [h("h3", { text: "Lifecycle history" }),
+        h("ul", { class: "plain small" }, ...a.history.map((x) => h("li", { text: `${fmtTime(x.effective_at)} · ${x.kind} · ${x.to_severity}/${x.to_status} · ${x.actor}: ${x.reason}` })))] : null,
+      d.telemetry && d.telemetry.length ? [h("h3", {}, "Drone telemetry behind the alert ", h("span", { class: "badge sim", text: "SIMULATED" })),
+        h("div", { class: "table-wrap" }, h("table", {},
+          h("thead", {}, h("tr", {}, ...["Time", "Battery", "Signal", "Altitude", "Zone", "Ref"].map((t) => h("th", { text: t })))),
+          h("tbody", {}, ...d.telemetry.map((t) => h("tr", {},
+            h("td", { class: "mono", text: fmtTime(t.time) }), h("td", { text: `${t.battery_percent}%` }),
+            h("td", { text: t.signal_percent == null ? "not reported" : `${t.signal_percent}%` }),
+            h("td", { text: `${t.altitude_m} m` }), h("td", { text: pretty(t.zone) }), h("td", { class: "mono", text: t.telemetry_ref }))))))] : null,
       h("h3", { text: "Numbers the rule compared" }),
       d.facts.length ? h("table", {}, h("tbody", {}, ...d.facts.map((f) => h("tr", {}, h("td", { text: f.name }), h("td", { class: "mono", text: String(f.value) }))))) : h("p", { class: "muted", text: "none" }),
       h("h3", { text: "Evidence chain" }),

@@ -28,8 +28,8 @@ video frame), `guard.py` (question filter, below), `__main__.py` (entry point).
 |---|---|---|
 | Pipeline strip | the six stages with live counts; each scrolls to its panel | `agent.summary.run_facts`, rules config |
 | Security overview | observations, frames, events, alerts, vehicle entities; severity, rule, zone, object and source breakdowns; limitations; run summary | `run_facts`, `render_summary` |
-| Event timeline | per-zone timeline (SVG) plus a table: time, type, subject, zone, duration, event id, alerts, frames; event evidence | `Store.query_events`, `event_view`, `get_event_observations` |
-| Alert investigation | rule, severity, zone, alert/event/frame ids, why it was raised, the numbers the rule compared, the evidence chain, the rules in force | `Store.query_alerts`, `AnalystTools.get_alert`, `alert_view`, rules config |
+| Event timeline | per-zone timeline (SVG, with a drone-telemetry lane for alerts that have no camera event) plus a table: time, type, subject, zone, duration, event id, alerts, frames; event evidence | `Store.query_events`, `event_view`, `get_event_observations` |
+| Alert investigation | rule, severity, zone, alert/event/frame ids, why it was raised, the numbers the rule compared, the evidence chain, the rules in force; on a backend with an alert lifecycle also status, verdict, recommended action, escalation ladder, history and the simulated drone telemetry behind a safety alert (shown only when the backend supplies them) | `Store.query_alerts`, `AnalystTools.get_alert`, `alert_view`, rules config |
 | AI analyst | question box, grounded answer, clickable citations, follow-ups, refusals | `AnalystSession(store, llm=None).ask()` (the deterministic template analyst and its citation check) |
 | Video / observations | the real frame for each observation (video runs), description, stored source, carried-forward flag, simulated telemetry, linked events | `Store.query_observations`, `observation_view`, `VideoSource` / `read_frame_at` |
 

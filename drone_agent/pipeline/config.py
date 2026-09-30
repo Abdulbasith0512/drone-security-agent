@@ -48,6 +48,20 @@ class VehicleMatchSettings(DomainModel):
     required_attributes: list[str] = Field(default_factory=lambda: ["color", "body_type"])
     # Optional explicit plate evidence (only used if the scenario/VLM supplied it).
     plate_attribute: str = "plate"
+    # ---- link SCORE (a heuristic 0-1 confidence that two sightings are one vehicle) ----------
+    # The gates above decide WHETHER two events can be linked; the score says how strongly the
+    # evidence supports it and ranks competing candidates. It is uncalibrated, never identity.
+    # An attribute equal only after normalisation ("dark blue" vs "blue") earns this credit.
+    normalized_match_credit: float = Field(default=0.8, gt=0, le=1)
+    # Score multiplier when the second sighting is in a different zone than the previous one.
+    zone_change_factor: float = Field(default=0.92, gt=0, le=1)
+    # Longer gaps between sightings weaken the link: factor = floor + (1 - floor) * exp(-gap/tau).
+    temporal_floor: float = Field(default=0.75, gt=0, le=1)
+    temporal_tau_seconds: float = Field(default=21600.0, gt=0)
+    # Two sightings that share an explicit plate score this (still not a proof of identity).
+    plate_confirmed_score: float = Field(default=0.98, gt=0, le=1)
+    # A candidate scoring below this is not linked (0 = the hard gates alone decide).
+    min_link_score: float = Field(default=0.5, ge=0, le=1)
 
 
 class EventConfig(DomainModel):

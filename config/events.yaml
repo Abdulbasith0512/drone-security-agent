@@ -21,3 +21,11 @@ normalization:          # used for matching only; stored attributes keep their o
 vehicle_matching:       # coarse "similar vehicle" memory (vehicles only, never people)
   required_attributes: [color, body_type]   # missing evidence prevents a link
   plate_attribute: plate                    # only used if the input explicitly supplies a plate
+  # Link SCORE: a heuristic 0-1 confidence that two sightings are one vehicle (uncalibrated, never
+  # an identity claim). The gates above decide whether a link is possible; the score ranks it.
+  normalized_match_credit: 0.8      # attribute equal only after normalisation ("dark blue" ~ "blue")
+  zone_change_factor: 0.92          # second sighting in a different zone than the previous one
+  temporal_floor: 0.75              # factor = floor + (1 - floor) * exp(-gap / tau)
+  temporal_tau_seconds: 21600       # 6 hours
+  plate_confirmed_score: 0.98       # two sightings sharing an explicit plate
+  min_link_score: 0.5               # below this a candidate is not linked (0 = gates only)

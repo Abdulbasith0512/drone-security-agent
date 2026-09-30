@@ -54,14 +54,20 @@ def tools(store):
 # ---- tools ----------------------------------------------------------------------------------
 def test_the_tool_set_is_a_fixed_read_only_list_with_no_sql_or_generic_execution(tools):
     assert TOOL_NAMES == (
-        "search_observations", "list_events", "get_event", "get_event_evidence", "list_entities",
-        "get_entity", "get_entity_history", "list_alerts", "get_alert", "get_run_summary",
+        "query_events", "search_events", "search_frames", "get_event", "get_frame", "get_alert",
+        "get_evidence", "entity_history", "list_entities", "list_alerts", "telemetry_at",
+        "get_timeline", "summarize_run",
     )  # fmt: skip
+    # Older methods stay for the deterministic template analyst; a model is never offered them.
+    template_only = {
+        "search_observations", "list_events", "get_event_evidence", "get_entity",
+        "get_entity_history", "get_run_summary", "trace",
+    }  # fmt: skip
     public = {n for n in dir(tools) if not n.startswith("_") and callable(getattr(tools, n))}
-    assert public == set(TOOL_NAMES)
+    assert public == set(TOOL_NAMES) | template_only
     import inspect
 
-    for name in TOOL_NAMES:
+    for name in public - {"trace"}:
         assert not {"sql", "query_sql", "statement"} & set(
             inspect.signature(getattr(tools, name)).parameters
         )

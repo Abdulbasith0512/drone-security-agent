@@ -325,11 +325,13 @@ class Store(DerivedMixin, RunsMixin):
         return datetime.fromisoformat(first[0]), datetime.fromisoformat(last[0])
 
     def observation_counts_by(self, column: str) -> dict[str, int]:
-        """Observation counts per `zone` or per `source` (a fixed whitelist, never user text)."""
-        if column not in ("zone", "source"):
-            raise ValueError("column must be 'zone' or 'source'")
+        """Observation counts per `zone`, `source` or `provenance` (a fixed whitelist, never user
+        text). Rows stored before provenance existed count as 'unknown'."""
+        if column not in ("zone", "source", "provenance"):
+            raise ValueError("column must be 'zone', 'source' or 'provenance'")
+        expr = "COALESCE(provenance, 'unknown')" if column == "provenance" else column
         rows = self._conn.execute(
-            f"SELECT {column} AS k, COUNT(*) AS n FROM observations GROUP BY {column} ORDER BY k"
+            f"SELECT {expr} AS k, COUNT(*) AS n FROM observations GROUP BY {expr} ORDER BY k"
         )
         return {r["k"]: r["n"] for r in rows}
 

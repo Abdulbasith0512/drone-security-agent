@@ -89,7 +89,7 @@ def test_langchain_tools_expose_exactly_the_read_only_tool_set(db_path):
     with Store.open(db_path) as store:
         tools = langchain_tools(AnalystTools(store))
         assert [t.name for t in tools] == list(TOOL_NAMES)
-        search = next(t for t in tools if t.name == "search_observations")
+        search = next(t for t in tools if t.name == "search_frames")
         assert {"query", "zone", "object_type", "start", "end", "limit"} == set(search.args)
         out = json.loads(search.invoke({"zone": "warehouse"}))
         assert out["total"] == 3
@@ -306,12 +306,18 @@ def test_core_packages_never_import_langchain_or_the_agent_layer():
 
 
 def test_only_agent_llm_imports_langchain():
+    # the model-facing modules of the analyst package: the live loop, the recorded-turn replay
+    # and the scripted planner (all chat models); nothing else, and nothing outside agent/
     hits = [
-        f.name
+        f.relative_to(ROOT).as_posix()
         for f in (ROOT / "drone_agent").rglob("*.py")
         if any(m.startswith("langchain") for m in _imports(f))
     ]
-    assert sorted(set(hits)) == ["llm.py"]
+    assert sorted(set(hits)) == [
+        "drone_agent/agent/llm.py",
+        "drone_agent/agent/planner.py",
+        "drone_agent/agent/replay.py",
+    ]
     assert not any(
         "langgraph" in m for f in (ROOT / "drone_agent").rglob("*.py") for m in _imports(f)
     )

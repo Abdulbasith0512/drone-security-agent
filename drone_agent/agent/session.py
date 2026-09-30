@@ -1,24 +1,34 @@
 """Analyst session: question -> (LLM or template) -> citation gate -> answer, with bounded memory.
 
 The gate is the safety net: an LLM answer is shown only if every cited id exists in the database
-AND was returned by a tool in this conversation, it cites something (or explicitly says
-"insufficient evidence"), and it makes no identity/intent claims. One correction retry is allowed;
-after that the deterministic template answer is returned instead of unsupported claims.
-The session never writes to the store. No LangChain here (the LLM is a Protocol).
+AND was returned by a tool in this conversation, every factual sentence carries its own citation,
+and it makes no identity/intent claims. Unambiguous citation slips are repaired first (a mistyped
+id one edit from a retrieved one); otherwise one correction retry is allowed; after that the
+deterministic template answer is returned instead of unsupported claims.
+The session never writes evidence. It only records what it did (`agent_runs`): the question, which
+mode answered, the tool calls and the outcome, never prompts, keys or model reasoning.
+No LangChain here (the LLM is a Protocol).
 """
 
+import contextlib
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from drone_agent.agent.citations import CitationReport, extract_citations, validate_answer
+from drone_agent.agent.citations import (
+    CitationReport,
+    extract_citations,
+    is_pure_refusal,
+    repair_citations,
+    validate_answer,
+)
 from drone_agent.agent.evidence import ToolLimits
 from drone_agent.agent.offline import OfflineAnalyst
 from drone_agent.agent.prompt import ANALYST_SYSTEM_PROMPT, SUMMARY_REQUEST
 from drone_agent.agent.summary import render_summary
 from drone_agent.agent.tools import AnalystTools
-from drone_agent.store import Store
+from drone_agent.store import Store, StoreError
 
 MAX_HISTORY_TURNS = 6  # question/answer pairs kept in memory; older ones are dropped
 
@@ -86,11 +96,21 @@ class Answer:
     retried: bool = False
     notes: list[str] = field(default_factory=list)
     metrics: AnswerMetrics | None = None  # only for LLM-backed answers; template mode has none
+    repairs: list[tuple[str, str]] = field(default_factory=list)  # citation slips fixed
+    model: str = ""  # which model (or scripted stand-in) wrote an "llm" answer
+    tool_trace: list[dict] = field(default_factory=list)  # every tool call made for this answer
 
     @property
     def label(self) -> str:
+        if self.mode == "llm":
+            if self.model.startswith("planner"):
+                return (
+                    "scripted-planner answer (real tool-calling loop, NO LLM), citations verified"
+                )
+            if self.model.startswith("replay"):
+                return "REPLAYED model answer (recorded, not live), citations verified"
+            return "LLM answer, citations verified"
         return {
-            "llm": "LLM answer, citations verified",
             "template": "template answer (deterministic, no LLM)",
             "fallback": "deterministic fallback (LLM answer withheld or unavailable)",
         }[self.mode]
@@ -113,27 +133,33 @@ class AnalystSession:
         llm: AnalystLLM | None = None,
         limits: ToolLimits | None = None,
         max_turns: int = MAX_HISTORY_TURNS,
+        record: bool = False,
     ) -> None:
         self.store = store
         self.llm = llm
-        self.tools = AnalystTools(store, limits)
+        self.tools = AnalystTools(store, limits, fit_results=llm is not None)
         self.offline = OfflineAnalyst(self.tools)
         self.history: deque[tuple[str, str]] = deque(maxlen=2 * max_turns)
         self.context: dict[str, str] = {}  # last entity/alert/event/zone, for template follow-ups
+        self.record = record  # write each answer to agent_runs (needs a writable store)
 
     # -- public -----------------------------------------------------------------------------
     def ask(self, question: str) -> Answer:
         question = question.strip()
         if not question:
             raise ValueError("question must not be empty")
+        mark = len(self.tools.calls)
         if self.llm:
             answer = self._measured(lambda: self._llm_answer(question))
         else:
             answer = self._template(question, "template")
+        answer.tool_trace = list(self.tools.calls[mark:])
         self._remember(question, answer)
+        self._record(question, answer)
         return answer
 
     def summarize(self) -> Answer:
+        mark = len(self.tools.calls)
         if self.llm is None:
             text = render_summary(self.tools.get_run_summary())
             answer = self._checked_template(text, "template")
@@ -143,7 +169,9 @@ class AnalystSession:
                     SUMMARY_REQUEST, fallback=lambda: render_summary(self.tools.get_run_summary())
                 )
             )
+        answer.tool_trace = list(self.tools.calls[mark:])
         self._remember("Summarize the run.", answer)
+        self._record("Summarize the run.", answer)
         return answer
 
     # -- internals --------------------------------------------------------------------------
@@ -153,8 +181,9 @@ class AnalystSession:
             stats.reset()
         started = time.perf_counter()
         answer = run()
+        answer.model = getattr(self.llm, "name", "unknown")
         answer.metrics = AnswerMetrics(
-            model=getattr(self.llm, "name", "unknown"),
+            model=answer.model,
             rounds=stats.rounds if isinstance(stats, CallStats) else None,
             tool_calls=stats.tool_calls if isinstance(stats, CallStats) else None,
             tools_used=tuple(sorted(set(stats.tools))) if isinstance(stats, CallStats) else (),
@@ -186,6 +215,16 @@ class AnalystSession:
         )
         return Answer(text, mode, [c.token for c in report.cited], notes=notes)
 
+    def _check_model_answer(self, text: str) -> CitationReport:
+        """The strict gate for model-written text: existence, retrieval, per-sentence citations."""
+        return validate_answer(
+            self.store,
+            text,
+            retrieved=self.tools.retrieved,
+            require_citation=not is_pure_refusal(text),
+            sentence_level=True,
+        )
+
     def _llm_answer(self, question: str, fallback=None) -> Answer:
         assert self.llm is not None
         history = list(self.history)
@@ -199,15 +238,25 @@ class AnalystSession:
             except AnalystLLMError as exc:
                 notes.append(f"analyst model unavailable: {exc}")
                 return self._fall_back(question, notes, fallback)
-            report = validate_answer(
-                self.store,
-                text,
-                retrieved=self.tools.retrieved,
-                require_citation="insufficient evidence" not in text.lower(),
-            )
+            report = self._check_model_answer(text)
+            repairs: list[tuple[str, str]] = []
+            if not report.ok:
+                fixed, repairs = repair_citations(text, self.tools.retrieved)
+                if repairs:
+                    repaired_report = self._check_model_answer(fixed)
+                    if repaired_report.ok:
+                        text, report = fixed, repaired_report
+                        notes.append(
+                            "repaired citation(s): " + ", ".join(f"{a} -> {b}" for a, b in repairs)
+                        )
             if report.ok:
                 return Answer(
-                    text, "llm", [c.token for c in report.cited], retried=attempt == 2, notes=notes
+                    text,
+                    "llm",
+                    [c.token for c in report.cited],
+                    retried=attempt == 2,
+                    notes=notes,
+                    repairs=repairs if any("repaired" in n for n in notes) else [],
                 )
             notes.append(f"attempt {attempt} rejected: " + "; ".join(report.problems()))
             correction = (text, _correction(report))
@@ -238,3 +287,34 @@ class AnalystSession:
         for kind, refs in cited.items():
             if len(refs) == 1:
                 self.context[kind] = next(iter(refs))
+
+    def _record(self, question: str, answer: Answer) -> None:
+        """Persist what the analyst did (opt-in; a read-only database is left alone)."""
+        if not self.record:
+            return
+        metrics = {
+            "citations": len(answer.citations),
+            "retried": answer.retried,
+            "repaired": len(answer.repairs),
+            **(
+                {
+                    "model": answer.metrics.model,
+                    "rounds": answer.metrics.rounds,
+                    "tool_calls": answer.metrics.tool_calls,
+                    "latency_s": round(answer.metrics.latency_s, 3),
+                }
+                if answer.metrics
+                else {}
+            ),
+        }
+        with contextlib.suppress(StoreError):  # a read-only database is left alone
+            self.store.add_agent_run(
+                "analyst",
+                question[:120],
+                answer.mode if not answer.model else f"{answer.mode}:{answer.model}",
+                "ok" if not answer.notes else "ok_with_notes",
+                input_text=question,
+                output_text=answer.text,
+                metrics=metrics,
+                trace=answer.tool_trace,
+            )

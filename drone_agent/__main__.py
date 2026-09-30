@@ -12,7 +12,11 @@ from rich.table import Table
 from rich.text import Text
 
 from drone_agent import cli_run
-from drone_agent.agent.build import build_gemini_analyst
+from drone_agent.agent.build import (
+    build_gemini_analyst,
+    build_planner_analyst,
+    build_replay_analyst,
+)
 from drone_agent.agent.config import AnalystConfig, AnalystConfigError
 from drone_agent.agent.session import AnalystSession, Answer
 from drone_agent.ingest import ingest_observations, ingest_result
@@ -799,13 +803,25 @@ def describe_frame_command(args: argparse.Namespace, console: Console) -> int:
 
 
 def _build_analyst_llm(args: argparse.Namespace, console: Console):
-    """None for the offline template analyst, else the Gemini analyst."""
+    """None for the offline template analyst; else a tool-calling analyst whose model is the live
+    Gemini model, a replay of a recorded one, or the scripted planner (no LLM at all)."""
     if args.offline or args.provider == "offline":
         return None
+    if args.provider == "planner":
+        console.print("Analyst: scripted planner in the real tool-calling loop (NO LLM, no key)")
+        return build_planner_analyst()
+    if args.provider == "replay":
+        if not args.analyst_cassette:
+            raise AnalystConfigError("--provider replay needs --analyst-cassette FILE")
+        llm = build_replay_analyst(args.analyst_cassette)
+        console.print(f"Analyst: REPLAYED model turns ({llm.name}); no live call")
+        return llm
     config = AnalystConfig.from_env(args.model)
-    llm = build_gemini_analyst(config)
+    llm = build_gemini_analyst(config, args.record_cassette)
     console.print("GEMINI_API_KEY configured: yes")
     console.print(f"Analyst model: {config.model}")
+    if args.record_cassette:
+        console.print(f"Recording model turns to {args.record_cassette}")
     return llm
 
 
@@ -820,10 +836,27 @@ def _print_answer(console: Console, question: str, answer: Answer) -> None:
         console.print(Text(f"note: {note}", style="yellow"))
     if answer.metrics:  # LLM-backed answers only; template mode makes no model requests
         console.print(Text(f"Analyst metrics: {answer.metrics.line()}", style="dim"))
+    if TRACE and answer.tool_trace:
+        for step in answer.tool_trace:
+            args = ", ".join(f"{k}={v}" for k, v in step["args"].items())
+            outcome = f"{step['refs']} ref(s)" if step["ok"] else f"error: {step.get('error', '')}"
+            console.print(Text(f"  tool {step['tool']}({args}) -> {outcome}", style="dim"))
+
+
+TRACE = False  # set by --trace: show every tool call behind an answer
 
 
 def _analyst_session(args: argparse.Namespace, console: Console, store: Store) -> AnalystSession:
-    return AnalystSession(store, _build_analyst_llm(args, console))
+    global TRACE
+    TRACE = bool(getattr(args, "trace", False))
+    return AnalystSession(store, _build_analyst_llm(args, console), record=True)
+
+
+def _flush_recording(session: AnalystSession, console: Console) -> None:
+    recorder = getattr(session.llm, "recorder", None)
+    if recorder is not None:
+        recorder.flush()
+        console.print(Text(f"analyst cassette written: {recorder.path}", style="dim"))
 
 
 def _follow_ups(args, console, session: AnalystSession) -> None:
@@ -856,6 +889,7 @@ def ask_command(args: argparse.Namespace, console: Console) -> int:
             if args.question:
                 _print_answer(console, args.question, session.ask(args.question))
             _follow_ups(args, console, session)
+            _flush_recording(session, console)
     except (StoreError, AnalystConfigError, ValueError) as exc:
         _error(console, str(exc))
         return 2
@@ -868,6 +902,7 @@ def summarize_command(args: argparse.Namespace, console: Console) -> int:
             session = _analyst_session(args, console, store)
             _print_answer(console, "Summarize the run.", session.summarize())
             _follow_ups(args, console, session)
+            _flush_recording(session, console)
     except (StoreError, AnalystConfigError, ValueError) as exc:
         _error(console, str(exc))
         return 2
@@ -1060,9 +1095,20 @@ def main(argv: Sequence[str] | None = None, console: Console | None = None) -> i
         )
         an.add_argument(
             "--provider",
-            choices=["offline", "gemini"],
+            choices=["offline", "gemini", "planner", "replay"],
             default="offline",
-            help="offline = deterministic template analyst (default, no key); gemini = LLM",
+            help="offline = deterministic template analyst (default); planner = the real "
+            "tool-calling loop with a scripted model (no LLM, no key); replay = recorded model "
+            "turns (--analyst-cassette); gemini = live LLM (needs a key)",
+        )
+        an.add_argument(
+            "--analyst-cassette", help="recorded model turns to replay (--provider replay)"
+        )
+        an.add_argument(
+            "--record-cassette", help="with --provider gemini: also record the model's turns here"
+        )
+        an.add_argument(
+            "--trace", action="store_true", help="show every tool call behind an answer"
         )
         an.add_argument("--offline", action="store_true", help="same as --provider offline")
         an.add_argument("--model", help="analyst model (default: ANALYST_MODEL from env/.env)")

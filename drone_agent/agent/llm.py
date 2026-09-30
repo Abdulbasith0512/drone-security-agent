@@ -1,8 +1,13 @@
 """LangChain adapter: the ONLY module that imports langchain.
 
-Gemini (through langchain-google-genai) is given the read-only tools and runs a small, bounded
+A chat model that supports tool calling is given the read-only tools and runs a small, bounded
 tool-calling loop (no LangGraph, no agent framework). It returns text only; the session then
 verifies the citations before anything is shown. Install with `pip install -e ".[agent]"`.
+
+The chat model is any object with `bind_tools(tools)` and `invoke(messages)`: the real Gemini
+model (`build_chat_model`), a `ReplayChatModel` that replays recorded model turns, or the
+deterministic `PlannerChatModel` (agent/replay.py). The loop, the tools, the caps and the citation
+gate are identical for all of them; only where the model's messages come from differs.
 """
 
 import json
@@ -13,28 +18,59 @@ from langchain_core.tools import StructuredTool
 
 from drone_agent.agent.config import AnalystConfig
 from drone_agent.agent.session import AnalystLLMError, CallStats
-from drone_agent.agent.tools import AnalystTools
+from drone_agent.agent.tools import TOOL_NAMES, AnalystTools
 
 MAX_TOOL_ROUNDS = 6  # model turns per answer that may request tools
 MAX_TOOL_CALLS = 12  # total tool executions per answer
 MAX_TOOL_RESULT_CHARS = 12000  # a bounded view should never reach this; guard anyway
 
+_ZONES = "main_gate, driveway, parking_area, warehouse, restricted_zone, garage"
 _DESCRIPTIONS = {
-    "search_observations": (
-        "Search stored observations. Optional: query (keywords), zone (main_gate, driveway, "
-        "parking_area, warehouse, restricted_zone), object_type (person, vehicle, other), start "
-        "and end (ISO-8601 with offset), limit. Returns at most 15 with total and truncated."
+    "query_events": (
+        f"List temporal events. Optional filters: zone ({_ZONES}), object_type (person, "
+        "vehicle, other), start and end (ISO-8601 with UTC offset; events overlapping the range), "
+        "entity_id, status (open or closed), limit."
     ),
-    "list_events": "List temporal events, optionally filtered by zone and object_type.",
-    "get_event": "Get one event by id, e.g. EVT-V-001.",
-    "get_event_evidence": "Get an event and the observations/frames it was built from.",
+    "search_events": (
+        "Events whose evidence matches a keyword search such as 'truck', 'blue pickup' or "
+        "'hoodie'. Optional zone and object_type. Returns the matched frame refs."
+    ),
+    "search_frames": (
+        f"Search stored frame observations. Optional: query (keywords), zone ({_ZONES}), "
+        "object_type, start and end (ISO-8601 with offset), limit. At most 15 results."
+    ),
+    "get_event": "Get one event by id, e.g. EVT-V-001 (status open/closed, confidence).",
+    "get_frame": "Get one frame by number: its observation, telemetry, events and alerts.",
+    "get_alert": (
+        "Get one alert by id: severity, status (open/escalated/acknowledged/resolved), verdict, "
+        "recommended action, escalation ladder, lifecycle history and rule facts."
+    ),
+    "get_evidence": (
+        "The full evidence chain behind alert:ID, event:ID or entity:ID: rule facts, events, "
+        "observations, frames and telemetry. Use this to explain WHY something was raised."
+    ),
+    "entity_history": (
+        "Appearance history of a vehicle entity (ENT-V-...), or, for a person event id "
+        "(EVT-P-...), earlier events in that zone with similar clothing. People are never "
+        "identity-linked, so a person result is a weak hint, not a match."
+    ),
     "list_entities": "List similar-vehicle entities (coarse attribute matches, not identities).",
-    "get_entity": "Get one vehicle entity by id, e.g. ENT-V-001.",
-    "get_entity_history": "Every separate appearance (event) of a vehicle entity, plus its alerts.",
-    "list_alerts": "List alerts raised by deterministic rules; filter by rule_id, severity, zone.",
-    "get_alert": "Get one alert (reason, rule facts, triggering events) by id.",
-    "get_run_summary": "Structured facts about the whole stored run: counts, span, zones, "
-    "events, alerts, entities, limitations.",
+    "list_alerts": (
+        "List alerts raised by the deterministic rules; filter by rule_id, severity, zone, "
+        "status (open, escalated, acknowledged, resolved), limit."
+    ),
+    "telemetry_at": (
+        "The drone's telemetry (battery, signal, altitude, position, zone) at a time "
+        "(ISO-8601 with offset): the latest sample at or before it. Telemetry is simulated."
+    ),
+    "get_timeline": (
+        "A chronological list of events opening/closing and alert raised/escalated/resolved "
+        "changes, optionally between start and end (ISO-8601 with offset)."
+    ),
+    "summarize_run": (
+        "Structured facts about the whole stored run: counts, time span, zones, events, alerts "
+        "and their statuses, entities and limitations."
+    ),
 }
 
 
@@ -45,7 +81,9 @@ def langchain_tools(tools: AnalystTools) -> list[StructuredTool]:
         method = getattr(tools, name)
 
         def run(**kwargs: Any) -> str:
-            text = json.dumps(method(**kwargs), default=str, ensure_ascii=True)
+            result = method(**kwargs)
+            tools.trace(name, kwargs, result)
+            text = json.dumps(result, default=str, ensure_ascii=True)
             if len(text) > MAX_TOOL_RESULT_CHARS:
                 return json.dumps({"error": "result too large; narrow the query"})
             return text
@@ -56,7 +94,7 @@ def langchain_tools(tools: AnalystTools) -> list[StructuredTool]:
             description=_DESCRIPTIONS[name],
         )
 
-    return [wrap(n) for n in _DESCRIPTIONS]
+    return [wrap(n) for n in TOOL_NAMES]
 
 
 def method_signature_proxy(method: Any, run: Any) -> Any:
@@ -78,7 +116,7 @@ def build_chat_model(config: AnalystConfig) -> Any:
         google_api_key=config.api_key,
         timeout=config.timeout_s,
         max_retries=1,
-    )
+    )  # no temperature: the Gemini 3.x chat models reject the argument
 
 
 def _flatten(content: Any) -> str:

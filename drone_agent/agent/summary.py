@@ -13,6 +13,7 @@ def run_facts(store: Store, limits: ToolLimits | None = None) -> dict:
     limits = limits or ToolLimits()
     span = store.observation_span()
     sources = store.observation_counts_by("source")
+    provenance = store.observation_counts_by("provenance")
     events = store.query_events()
     alerts = store.query_alerts()
     entities = store.list_entities()
@@ -23,7 +24,7 @@ def run_facts(store: Store, limits: ToolLimits | None = None) -> dict:
 
     event_views = []
     for ev in events[: limits.max_events]:
-        view = event_view(ev, limits)
+        view = event_view(ev, limits, detail=False)
         view["alert_refs"] = [f"alert:{a}" for a in alert_ids_by_event.get(ev.event_id, [])]
         event_views.append(view)
     by_severity: dict[str, int] = {}
@@ -49,10 +50,11 @@ def run_facts(store: Store, limits: ToolLimits | None = None) -> dict:
         ],
         "object_counts": store.detected_object_counts(),
         "sources": sources,
+        "provenance": provenance,
         "events": event_views,
         "events_total": len(events),
         "events_truncated": len(events) > limits.max_events,
-        "alerts": [alert_view(a, limits) for a in alerts[: limits.max_alerts]],
+        "alerts": [alert_view(a, limits, detail=False) for a in alerts[: limits.max_alerts]],
         "alerts_total": len(alerts),
         "alerts_truncated": len(alerts) > limits.max_alerts,
         "alerts_by_severity": by_severity,
@@ -60,12 +62,19 @@ def run_facts(store: Store, limits: ToolLimits | None = None) -> dict:
         "entities": [entity_view(e) for e in entities[: limits.max_entities]],
         "entities_total": len(entities),
     }
-    facts["limitations"] = limitations(store, sources, len(events), len(alerts), len(entities))
+    facts["limitations"] = limitations(
+        store, sources, provenance, len(events), len(alerts), len(entities)
+    )
     return facts
 
 
 def limitations(
-    store: Store, sources: dict[str, int], events: int, alerts: int, entities: int
+    store: Store,
+    sources: dict[str, int],
+    provenance: dict[str, int],
+    events: int,
+    alerts: int,
+    entities: int,
 ) -> list[str]:
     out = ["Zones, timestamps and telemetry are simulated; they are not read from the video."]
     carried = sum(n for s, n in sources.items() if s.endswith("+carried"))
@@ -74,10 +83,26 @@ def limitations(
             f"{carried} observation(s) are carried forward from an earlier accepted frame "
             "(temporal propagation), not new model inferences."
         )
-    if any(s.startswith("gemini") for s in sources):
+    live, replayed = provenance.get("live", 0), provenance.get("replayed", 0)
+    if live or replayed or any(s.startswith("gemini") for s in sources):
         out.append(
             "Descriptions come from a vision model and can be wrong; stored confidence values "
             "are an uncalibrated placeholder, not probabilities."
+        )
+    if replayed:
+        out.append(
+            f"{replayed} observation(s) are REPLAYED from a recorded model response: no model "
+            "was called in this run."
+        )
+    if provenance.get("canned"):
+        out.append(
+            f"{provenance['canned']} observation(s) are canned demo text, not the output of "
+            "any vision model."
+        )
+    if provenance.get("scripted"):
+        out.append(
+            f"{provenance['scripted']} observation(s) are scripted scenario text written by the "
+            "author, not perception output; scores on them measure the rules, not a model."
         )
     if entities:
         out.append(
@@ -123,8 +148,8 @@ def render_summary(facts: dict) -> str:
         for a in facts["alerts"]:
             events = " ".join(f"[{e}]" for e in a["event_refs"])
             lines.append(
-                f"- [{a['ref']}] {a['severity']}: {a['title']} ({a['zone']}, "
-                f"triggered {a['triggered_at'][:19].replace('T', ' ')}) {events}"
+                f"- [{a['ref']}] {a['severity']}/{a['status']}: {a['title']} ({a['zone']}, "
+                f"triggered {a['triggered_at'][:19].replace('T', ' ')}) {events}".rstrip()
             )
         if facts["alerts_truncated"]:
             lines.append(f"  (showing {len(facts['alerts'])} of {facts['alerts_total']} alerts)")

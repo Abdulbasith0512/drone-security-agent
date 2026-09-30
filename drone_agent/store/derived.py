@@ -287,6 +287,18 @@ class DerivedMixin:
         by_id = {o.observation_id: o for o in found}
         return [by_id[i] for i in ids]
 
+    def event_ids_for_observation(self, observation_id: str) -> list[str]:
+        """The events whose evidence includes this observation (reverse of the evidence link)."""
+        return [
+            r["event_id"]
+            for r in self._conn.execute(
+                "SELECT eo.event_id FROM event_observations eo"
+                " JOIN events e ON e.event_id = eo.event_id WHERE eo.observation_id = ?"
+                " ORDER BY e.first_seen_utc, e.event_id",
+                (observation_id,),
+            )
+        ]
+
     def get_entity(self, entity_id: str) -> Entity | None:
         rows = self._entity_rows("entity_id = ?", [entity_id])
         return rows[0] if rows else None

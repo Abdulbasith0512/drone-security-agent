@@ -3,7 +3,14 @@
 Deliberately small and defensive: it binds to loopback only, serves a FIXED whitelist of static
 files (no directory access, no path joining from user input), validates every route with a strict
 pattern, checks the Host and Origin headers, caps request bodies and sends a restrictive
-Content-Security-Policy. There is no authentication because it is a local, read-only demo.
+Content-Security-Policy. There is no authentication because it is a read-only demo.
+
+Public mode (opt-in): behind a hosting proxy the browser's Host is the public hostname, so a
+loopback-only Host check would refuse every request. `make_server(..., public_host="a.example.com")`
+adds EXACTLY that hostname to the accepted Host values (with or without the port) and exactly
+`https://<that hostname>` to the accepted Origin values, and lets the server bind 0.0.0.0. Nothing
+else is loosened: every other Host or Origin is still refused, and without `public_host` the server
+behaves exactly as before (loopback only, loopback Host/Origin only).
 """
 
 import json
@@ -17,6 +24,26 @@ from drone_agent.web.api import ApiError, DashboardApi
 from drone_agent.web.frames import DEFAULT_WIDTH
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+PUBLIC_BIND_HOST = "0.0.0.0"  # only ever accepted together with a public hostname
+# A DNS name or an IPv4 literal: labels of letters, digits and hyphens. No scheme, port, path,
+# wildcard, userinfo or whitespace, so a typo cannot turn the allow-list into something broader.
+_HOSTNAME = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+
+
+def normalise_public_host(value: str) -> str:
+    """The lower-cased hostname, or ValueError if it is not a bare hostname. Whitespace is an error,
+    not something to tidy: a stray space or newline in a setting should fail loudly."""
+    host = value.lower()
+    if not _HOSTNAME.fullmatch(host):
+        raise ValueError(
+            f"{value!r} is not a bare hostname (for example app.onrender.com): no scheme, port, "
+            "path, wildcard or spaces"
+        )
+    return host
+
+
 MAX_BODY_BYTES = 8 * 1024
 DRAIN_LIMIT = (
     64 * 1024
@@ -60,6 +87,7 @@ _ASK_ROUTE = re.compile(rf"^/api/runs/{_RUN}/ask$")
 class DashboardHandler(BaseHTTPRequestHandler):
     api: DashboardApi
     quiet = False
+    public_host: str | None = None  # set only in public mode (see the module docstring)
     server_version = "DroneDashboard/1"
     timeout = REQUEST_TIMEOUT_S  # socket timeout for reading the request
 
@@ -89,12 +117,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
         port = self.server.server_port
         return {f"{h}:{port}" for h in ("127.0.0.1", "localhost", "[::1]")}
 
+    def _host_ok(self, host: str) -> bool:
+        if host in self._allowed_hosts():
+            return True
+        public = self.public_host
+        # public mode: exactly the configured hostname (Host names are case-insensitive), as the
+        # proxy sends it (no port) or with the port when reached directly
+        return public is not None and host.lower() in {
+            public,
+            f"{public}:{self.server.server_port}",
+        }
+
+    def _origin_ok(self, origin: str) -> bool:
+        if origin in {f"http://{h}" for h in self._allowed_hosts()}:
+            return True
+        public = self.public_host
+        return public is not None and origin.lower() == f"https://{public}"
+
     def _headers_ok(self) -> bool:
-        if self.headers.get("Host", "") not in self._allowed_hosts():
+        if not self._host_ok(self.headers.get("Host", "")):
             self._error(HTTPStatus.FORBIDDEN, "unexpected Host header")
             return False
         origin = self.headers.get("Origin")
-        if origin is not None and origin not in {f"http://{h}" for h in self._allowed_hosts()}:
+        if origin is not None and not self._origin_ok(origin):
             self._error(HTTPStatus.FORBIDDEN, "unexpected Origin")
             return False
         return True
@@ -257,12 +302,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def make_server(
-    api: DashboardApi, host: str = "127.0.0.1", port: int = 8765, quiet: bool = False
+    api: DashboardApi,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    quiet: bool = False,
+    public_host: str | None = None,
 ) -> ThreadingHTTPServer:
-    """A ready (bound, not yet serving) server. Non-loopback hosts are refused."""
-    if host not in LOOPBACK_HOSTS:
+    """A ready (bound, not yet serving) server. Non-loopback hosts are refused unless a public
+    hostname is given; then 0.0.0.0 may be bound and that hostname (only) is accepted."""
+    allowed_binds = LOOPBACK_HOSTS
+    public = None
+    if public_host is not None:
+        public = normalise_public_host(public_host)
+        allowed_binds = (*LOOPBACK_HOSTS, PUBLIC_BIND_HOST)
+    if host not in allowed_binds:
         raise ValueError(f"the dashboard binds to loopback only ({', '.join(LOOPBACK_HOSTS)})")
-    handler = type("Handler", (DashboardHandler,), {"api": api, "quiet": quiet})
+    handler = type(
+        "Handler", (DashboardHandler,), {"api": api, "quiet": quiet, "public_host": public}
+    )
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     return server

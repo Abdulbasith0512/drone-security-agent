@@ -41,3 +41,5 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.ruff.lint.per-file-ignores]
 # The evaluation harness builds long explanatory prose strings; wrapping them hurts readability.
 "drone_agent/eval/*.py" = ["E501"]
+# Report tooling builds long HTML strings and tables.
+"report/*.py" = ["E501"]

@@ -428,6 +428,26 @@ def test_the_analyst_answers_with_the_apis_text_and_clickable_citations(page, si
     )
     assert dom(page, f"svg.timeline rect[data-event={event_id}]", "el.classList.contains('sel')")
     assert dom(page, "#chat-log", "el.getAttribute('role')") == "log"
+    # many answers together are taller than the log: the log must scroll and no answer may be squashed
+    for more in (
+        "What objects were observed?",
+        "What happened at the main gate?",
+        "Was the black van seen more than once?",
+        "Summarize the run.",
+    ):
+        ask(page, more)
+    clipped = page.js(
+        "[...document.querySelectorAll('#chat-log .msg')].filter(m => m.scrollHeight > m.clientHeight + 1).length"
+    )
+    assert clipped == 0, f"{clipped} chat messages are clipped instead of the log scrolling"
+    assert page.js(
+        "(l => l.scrollHeight > l.clientHeight + 10)(document.querySelector('#chat-log'))"
+    ), "the chat log does not scroll"
+    page.js("document.querySelector('#chat-log').scrollTop = 0")
+    first_answer = page.js(
+        "(m => ({shown: m.clientHeight, whole: m.scrollHeight}))(document.querySelectorAll('#chat-log .msg.bot')[1])"
+    )
+    assert first_answer["shown"] >= first_answer["whole"] - 1 and first_answer["shown"] > 120
     assert page.problems() == []
 
 

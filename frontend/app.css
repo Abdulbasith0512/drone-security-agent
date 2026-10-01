@@ -266,6 +266,7 @@ details.rules pre { margin: 4px 0 0; white-space: pre-wrap; font-family: var(--m
 .analyst { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: var(--s4); align-items: start; }
 .chat-log { min-height: 140px; max-height: 560px; overflow: auto; display: flex; flex-direction: column; gap: var(--s3); padding: 2px; }
 .msg { max-width: 94%; border-radius: var(--r2); }
+.chat-log > .msg { flex: none; }  /* never shrink a message to fit the log: the log scrolls instead */
 .msg.user { align-self: flex-end; padding: var(--s2) var(--s3); background: var(--primary); color: var(--on-primary); font-weight: 550; overflow-wrap: anywhere; }
 .msg.bot { align-self: stretch; max-width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--ai); overflow: hidden; }
 .msg.bot.refused { border-left-color: var(--crit); }

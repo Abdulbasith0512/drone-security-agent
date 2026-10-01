@@ -1,16 +1,21 @@
 """Build the final report: report/report_template.html -> report/report.html -> PDF (headless Edge).
 
 Every table and chart is generated from docs/evaluation.md (the committed evaluation snapshot); the
-functional results are cross-checked against a fresh run of the deterministic, offline harness. Real-video
-numbers are asserted against docs/real_video_experiment.md. No API call and no network access.
+functional results are cross-checked against a fresh run of the deterministic, offline harness. The
+real-video numbers are computed by replaying the bundled clip and cassette (demo_assets/real_clip/) and
+asserted against docs/real_video_experiment.md. After the PDF is written it is verified (page count, no
+embedded files, no confidential file). No API call and no network access.
 
 Run:  python report/make_diagrams.py && python report/build_report.py [--no-pdf]
 """
 
 import argparse
+import base64
 import re
 import subprocess
 import sys
+import tempfile
+from datetime import date
 from html import escape
 from pathlib import Path
 
@@ -61,7 +66,9 @@ def num(value):
 # ---- HTML helpers -----------------------------------------------------------------------------
 def table(header, rows, caption=None, cls="", align=None):
     align = align or {}
-    head = "".join(f'<th class="{align.get(h, "")}">{escape(str(h))}</th>' for h in header)
+    head = "".join(
+        f'<th class="{align.get(h, "")}">{escape(str(h).replace("_", " "))}</th>' for h in header
+    )
     body = ""
     for row in rows:
         cells = "".join(
@@ -69,11 +76,12 @@ def table(header, rows, caption=None, cls="", align=None):
         )
         body += f"<tr>{cells}</tr>"
     cap = f"<caption>{escape(caption)}</caption>" if caption else ""
+    cls = f"{cls} keep" if len(rows) <= 12 else cls  # a short table stays on one page
     return f'<table class="data {cls}">{cap}<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
 
 
 def bars(title, labels, values, ymax, color, w=380, h=190, fmt="{:g}"):
-    left, bottom, top = 40, h - 42, 26
+    left, bottom, top = 40, h - 42, 38
     plot_h, n = bottom - top, len(values)
     gap = (w - left - 10) / n
     out = [f'<text x="{w / 2}" y="16" text-anchor="middle" class="ct">{escape(title)}</text>']
@@ -270,7 +278,14 @@ def build_context():
     # -- flicker
     fl = first(T, "Flicker-tolerance ablation (max_missed_frames)")
     ctx["TBL_FLICKER"] = table(
-        ["fixture", "max_missed_frames", "person_events", "durations_s", "loitering_alerts"],
+        [
+            "fixture",
+            "max_missed_frames",
+            "person_events",
+            "durations_s",
+            "loitering_alerts",
+            "loitering_severities",
+        ],
         fl,
         "Gap sweep: one person seen for 4 frames, a gap of N undetected frames, then 4 more frames (controlled fixture)",
         "num",
@@ -316,13 +331,14 @@ def build_context():
     V |= {
         "ent_ctrl_total": str(len(controls)),
         "ent_ctrl_ok": str(sum(1 for r in controls if r["contract_respected"] == "True")),
+        "ent_false": str(sum(1 for r in controls if r["false_link"] == "True")),
         "ent_base_entities": settings[0]["vehicle_entities"],
         "ent_base_alerts": settings[0]["repeat_vehicle_alerts"],
         "ent_off_alerts": settings[1]["repeat_vehicle_alerts"],
     }
     # -- rules
     ctx["TBL_RULES"] = table(
-        ["rule", "tp", "fp", "tn", "fn", "precision", "recall"],
+        ["rule", "tp", "fp", "tn", "fn", "precision", "recall", "f1"],
         rules,
         "Rule agreement with hand-written labels (controlled synthetic scenarios only)",
         "num",
@@ -338,8 +354,133 @@ def build_context():
         check=True,
     ).stdout.splitlines()
     test_ids = [line for line in collected if "::" in line]
-    V["n_tests"] = f"{len(test_ids):,}"
+    V["n_tests"] = str(len(test_ids))
     V["n_test_modules"] = str(len({line.split("::")[0] for line in test_ids}))
+    by_module: dict[str, int] = {}
+    for line in test_ids:
+        stem = Path(line.split("::")[0]).stem
+        by_module[stem] = by_module.get(stem, 0) + 1
+    groups = [
+        (
+            "Domain and simulation",
+            [
+                "test_models",
+                "test_clock",
+                "test_telemetry_simulator",
+                "test_sync",
+                "test_scenario",
+                "test_simulate",
+            ],
+            "strict immutable models, timezone-aware time, seeded determinism, midnight crossing, dropouts and the stale-telemetry boundary, scenario validation",
+        ),
+        (
+            "Storage and indexing",
+            ["test_store", "test_store_v4", "test_store_v5", "test_ingest"],
+            "schema and foreign keys, exact round trips, timezone-safe ordering, filters, FTS5 ranking and safe search text, atomic ingest, in-place migrations, CLI queries",
+        ),
+        (
+            "Events, entities, observed departure",
+            [
+                "test_aggregator",
+                "test_context_engine",
+                "test_build_events",
+                "test_departure",
+                "test_linker",
+                "test_linker_scoring",
+                "test_recurrence",
+            ],
+            "evidence and duration, missed-frame tolerance, gap and zone splits, incremental equals batch, a close reason is not a departure, coarse linking, plates, people never linked, idempotent rebuilds",
+        ),
+        (
+            "Rules, safety and lifecycle",
+            ["test_rules", "test_analyze", "test_safety_rules", "test_lifecycle"],
+            "inclusive thresholds, after-hours window edges, repeat vehicle, restricted zone, battery, signal, altitude, geofence, escalation of the same alert, operator actions, illegal transitions refused",
+        ),
+        (
+            "Progressive runtime",
+            ["test_runtime", "test_sampling", "test_perception", "test_cli_run"],
+            "tick ordering and pacing, alerts persisted mid-run, streaming equals batch, sampling reasons, perception timeout and fallback, the run command",
+        ),
+        (
+            "Video, providers, resilience",
+            [
+                "test_video",
+                "test_cassette",
+                "test_video_ingest",
+                "test_gemini",
+                "test_video_live",
+                "test_video_resilience",
+                "test_real_clip_evidence",
+            ],
+            "unusable files, sampling, gate, carry bound, cassette record/replay/miss/mismatch, strict provider output, Gemini key handling and retries (SDK mocked), progressive equals batch, classified failures, timeouts",
+        ),
+        (
+            "Analyst and grounding",
+            [
+                "test_agent_core",
+                "test_agent_llm",
+                "test_agent_truncation",
+                "test_analyst_m12",
+                "test_factcheck",
+                "test_tool_contract",
+            ],
+            "bounded read-only tools, citation validation, the factual-claim check, retry then fallback, sessions, one tool-name contract, LangChain adapter with a fake chat model, truncation notices",
+        ),
+        (
+            "Evaluation harness",
+            [
+                "test_ground_truth",
+                "test_eval_metrics",
+                "test_sampler_noise_eval",
+                "test_eval",
+                "test_scale_bench",
+            ],
+            "determinism, metric maths and zero denominators, label-satisfied versus exact, one-to-one matching, experiment mechanics, no network or key",
+        ),
+        (
+            "Dashboard server, hosting, real demo",
+            [
+                "test_web_api",
+                "test_web_bundle",
+                "test_web_guard",
+                "test_web_server",
+                "test_web_public",
+                "test_web_real_demo",
+            ],
+            "read-only API, localhost guard, static bundle, frame images, the question guard, the opt-in public hostname, the bundled clip and cassette checked against their manifest and replayed with no key and no network",
+        ),
+        (
+            "Dashboard UI",
+            ["test_web_ui", "test_web_ui_browser"],
+            "required structure, no inline styles, WCAG AA contrast, no hardcoded results; a real headless browser compares the page with the API and checks interactions, errors, keyboard use and five viewport sizes",
+        ),
+        (
+            "Repository rules",
+            ["test_scaffold", "test_repo_layout"],
+            "core packages never import LangChain, repository layout",
+        ),
+    ]
+    covered = sorted(m for _, mods, _ in groups for m in mods)
+    assert covered == sorted(by_module), (
+        f"test modules missing from the report's groups: {set(covered) ^ set(by_module)}"
+    )
+    ctx["TBL_TESTS"] = table(
+        ["Area", "Modules", "Tests", "What is verified"],
+        [
+            {
+                "Area": name,
+                "Modules": len(mods),
+                "Tests": sum(by_module[m] for m in mods),
+                "What is verified": what,
+            }
+            for name, mods, what in groups
+        ],
+        f"Test organisation, counted from the collected suite ({len(test_ids)} tests in {len(by_module)} modules)",
+        "",
+        {"Modules": "num", "Tests": "num"},
+    )
+    V["n_ui_tests"] = str(by_module["test_web_ui"] + by_module["test_web_ui_browser"])
+    V["n_browser_tests"] = str(by_module["test_web_ui_browser"])
     # -- streaming ground truth and adaptive sampling (tables parsed from the committed snapshot,
     # cross-checked against the fresh run so a stale snapshot cannot be rendered)
     gt = first(T, "Ground-truth scenarios: precision, recall, F1, severity and detection latency")
@@ -351,6 +492,8 @@ def build_context():
     V["gt_scenarios"] = str(len(gt))
     V["gt_tp"] = str(fresh_gt["tp"])
     V["gt_exact"] = str(sum(1 for r in gt if r["exact"] == "True"))
+    V["gt_satisfied"] = str(sum(1 for r in gt if r["label_satisfied"] == "True"))
+    V["gt_alerts"] = str(sum(int(r["expected_alerts"]) for r in gt))
     ctx["TBL_GT"] = table(
         [
             "scenario",
@@ -361,6 +504,8 @@ def build_context():
             "f1",
             "forbidden_hits",
             "events",
+            "events_extra",
+            "label_satisfied",
             "exact",
         ],
         gt,
@@ -419,9 +564,11 @@ def build_context():
                 "category": c,
                 "answers": len(v),
                 "claims true": "yes" if v[0]["claims_supported_by_evidence"] == "True" else "no",
-                "accepted by citation gate": sum(1 for r in v if r["gate_accepts"] == "True"),
-                "accepted by gate + structured checker": sum(
-                    1 for r in v if r["gate_plus_checker_accepts"] == "True"
+                "accepted by citation check alone": sum(
+                    1 for r in v if r["gate_accepts"] == "True"
+                ),
+                "accepted by production gate": sum(
+                    1 for r in v if r["production_gate_accepts"] == "True"
                 ),
             }
         )
@@ -430,11 +577,11 @@ def build_context():
             "category",
             "answers",
             "claims true",
-            "accepted by citation gate",
-            "accepted by gate + structured checker",
+            "accepted by citation check alone",
+            "accepted by production gate",
         ],
         rows,
-        "Citation-valid answers, by category (authored from the evidence model)",
+        "Citation-valid answers, by category (authored from the evidence model; production gate = citation check + factual-claim check)",
         "num",
     )
     unsup = [r for r in pr if r["claims_supported_by_evidence"] != "True"]
@@ -450,7 +597,31 @@ def build_context():
             sum(1 for r in expressible if r["gate_plus_checker_accepts"] != "True")
         ),
         "probe_still": str(sum(1 for r in unsup if r["gate_plus_checker_accepts"] == "True")),
+        "probe_prod_acc": str(sum(1 for r in unsup if r["production_gate_accepts"] == "True")),
+        "probe_prod_rej": str(sum(1 for r in unsup if r["production_gate_accepts"] != "True")),
+        "probe_ctrl_prod_acc": str(sum(1 for r in ctrl if r["production_gate_accepts"] == "True")),
+        "probe_expr_prod_rej": str(
+            sum(1 for r in expressible if r["production_gate_accepts"] != "True")
+        ),
     }
+    # which unsupported answers the production gate still accepts, and what it rejects (from the table)
+    accepted = [r for r in unsup if r["production_gate_accepts"] == "True"]
+    rejected = [r for r in unsup if r["production_gate_accepts"] != "True"]
+    rej_by_cat: dict[str, int] = {}
+    for r in rejected:
+        rej_by_cat[r["category"]] = rej_by_cat.get(r["category"], 0) + 1
+    ctx["LIST_PROBE_ACCEPTED"] = (
+        "<ul>"
+        + "".join(
+            f"<li><code>{escape(r['category'])}</code>: {escape(r['case'])}</li>" for r in accepted
+        )
+        + "</ul>"
+    )
+    ctx["LIST_PROBE_REJECTED"] = (
+        "<ul>"
+        + "".join(f"<li><code>{escape(c)}</code>: {n}</li>" for c, n in rej_by_cat.items())
+        + "</ul>"
+    )
     # -- ablation
     ab = first(T, "Ablation table")
     ctx["TBL_ABLATION"] = table(
@@ -518,23 +689,147 @@ def build_context():
         "p100_agg": f"{pivot['event_aggregation'][0]:g}",
     }
 
-    # -- real video: numbers asserted against the committed document
+    # -- real video: replay the BUNDLED clip and cassette (no model, no network) and assert that the
+    # committed documents say exactly what the replay produces
+    from drone_agent.store import Store
+    from drone_agent.web.bundle import build_real_run, load_real_assets
+
+    manifest = load_real_assets()
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        run = build_real_run(tmp)
+        with Store.open(run.db) as store:
+            obs = store.query_observations()
+            events = store.query_events()
+            entities = store.list_entities()
+            n_alerts = store.count_alerts()
+    carried = sum(1 for o in obs if o.source.endswith("+carried"))
+    objs = [d.object_type.value for o in obs for d in o.detected_objects]
+    single = sum(1 for e in events if len(e.frame_ids) == 1)
+    clip = manifest["clip"]
+    V |= {
+        "rv_bytes": f"{clip['size_bytes']:,}",
+        "rv_frames": str(clip["frame_count"]),
+        "rv_fps": f"{clip['fps']:g}",
+        "rv_seconds": f"{clip['duration_seconds']:g}",
+        "rv_size": f"{clip['width']}&times;{clip['height']}",
+        "rv_sha": clip["sha256"][:16],
+        "rv_model": manifest["cassette"]["provider"],
+        "rv_model_name": manifest["cassette"]["provider"].split(":")[-1].replace("-", " ").title(),
+        "rv_entries": str(manifest["cassette"]["entries"]),
+        "rv_obs": str(len(obs)),
+        "rv_replayed": str(len(obs) - carried),
+        "rv_carried": str(carried),
+        "rv_objects": str(len(objs)),
+        "rv_obj_person": str(objs.count("person")),
+        "rv_obj_vehicle": str(objs.count("vehicle")),
+        "rv_events": str(len(events)),
+        "rv_ev_person": str(sum(1 for e in events if e.object_type.value == "person")),
+        "rv_ev_vehicle": str(sum(1 for e in events if e.object_type.value == "vehicle")),
+        "rv_single": str(single),
+        "rv_entities": str(len(entities)),
+        "rv_alerts": str(n_alerts),
+        "rv_max_event": f"{max(e.duration_seconds for e in events):g}",
+        "rv_start": manifest["replay"]["start"],
+    }
+    assert (V["rv_obs"], V["rv_replayed"], V["rv_carried"], V["rv_objects"]) == (
+        "9",
+        "8",
+        "1",
+        "33",
+    )
+    assert (V["rv_events"], V["rv_entities"], V["rv_alerts"]) == ("28", "12", "0")
     for needle in [
         "10,797,538",
         "617 frames",
         "24.68 s",
-        "8 accepted, 1 skipped",
-        "8 API calls, 0 retries, 76.1 s",
-        "9 observations",
-        "33 detected objects",
-        "(17 person, 16 vehicle)",
-        "**25** (13 person, 12 vehicle)",
-        "**11** coarse",
-        "**0**",
-        "1.32",
         "d7e3ceeba55902be",
+        f"{V['rv_events']} ({V['rv_ev_person']} person, {V['rv_ev_vehicle']} vehicle; {V['rv_single']} single-frame)",
+        f"{V['rv_entities']} (1 with several appearances)",
+        "9 (8 replayed, 1 carried forward at frame 525)",
+        f"33 ({V['rv_obj_person']} person, {V['rv_obj_vehicle']} vehicle)",
+        "**25** (13 person, 12 vehicle)",  # the first recording, section 5 of the document
+        "**11** coarse",
+        "licensed for redistribution",
     ]:
         assert needle in rv_text, f"real-video document no longer contains: {needle}"
+    # the README and the dashboard document must state the same replay result
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for needle in ["10,797,538 bytes", "28 events, 12 entities, 0 alerts", "1301 tests"]:
+        assert needle in readme, f"README no longer contains: {needle}"
+    assert V["n_tests"] == "1301", f"the documents say 1301 tests, the suite has {V['n_tests']}"
+
+    # -- the shipped scripted scenarios: counts computed by running the existing CLI commands
+    from drone_agent.web.bundle import _cli
+
+    def scripted(name: str) -> dict:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db = str(Path(tmp) / f"{name}.db")
+            _cli("ingest", str(ROOT / "scenarios" / f"{name}.yaml"), "--db", db)
+            _cli("build-events", "--db", db)
+            _cli("analyze", "--db", db)
+            with Store.open(db) as store:
+                return {
+                    "obs": store.count_observations(),
+                    "objects": sum(len(o.detected_objects) for o in store.query_observations()),
+                    "events": store.count_events(),
+                    "entities": store.count_entities(),
+                    "alerts": store.count_alerts(),
+                }
+
+    sec_counts, normal_counts = scripted("security_events"), scripted("normal_day")
+    assert (str(sec_counts["obs"]), str(sec_counts["objects"]), str(sec_counts["events"])) == (
+        V["sec_obs"],
+        V["sec_det"],
+        V["sec_events"],
+    ), "the compression table and the scenario replay disagree"
+    V |= {
+        "sec_entities": str(sec_counts["entities"]),
+        "sec_alerts": str(sec_counts["alerts"]),
+        "normal_alerts": str(normal_counts["alerts"]),
+    }
+    assert (V["sec_alerts"], V["sec_entities"], V["normal_alerts"]) == ("7", "2", "0")
+
+    # -- the committed scale report (previously measured, one machine): quoted, never re-run here
+    bench = (ROOT / "bench" / "scale_report.md").read_text(encoding="utf-8")
+
+    def bench_row(label: str) -> list[str]:
+        m = re.search(rf"^\| {re.escape(label)} \| ([^|]+) \| ([^|]+) \|", bench, re.M)
+        assert m, f"bench/scale_report.md has no row {label!r}"
+        return [c.strip() for c in m.groups()]
+
+    summ = re.search(r"tool_summarize_run \| ([0-9.]+) / ([0-9.]+) \| ([0-9.]+) / ([0-9.]+)", bench)
+    link = re.search(r"- seconds\.link: ([0-9.]+)", bench)
+    machine = re.search(r"^Machine: (.+)$", bench, re.M)
+    assert summ and link and machine, "bench/scale_report.md changed shape"
+    V |= {
+        "bench_tput_10k": bench_row("ingest throughput (obs/s)")[0],
+        "bench_tput_100k": bench_row("ingest throughput (obs/s)")[1],
+        "bench_db_100k": bench_row("DB size (MiB)")[1],
+        "bench_mem_100k": bench_row("peak memory (MiB)")[1],
+        "bench_sum_p50_100k": summ.group(3),
+        "bench_sum_p95_100k": summ.group(4),
+        "bench_link_exp": link.group(1),
+        "bench_machine": machine.group(1).split(". measurements")[0].rstrip("."),
+    }
+
+    # -- cover facts and the dashboard figure
+    head = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True
+    ).stdout.strip()
+    V["built_on"] = head or "unknown"
+    changed = [
+        ln
+        for ln in subprocess.run(
+            ["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True
+        ).stdout.splitlines()
+        if not ln.endswith("plan.md")
+    ]
+    V["built_state"] = (
+        f"plus {len(changed)} uncommitted file changes" if changed else "working tree clean"
+    )
+    V["build_date"] = f"{date.today().day} {date.today():%B %Y}"
+    png = (REPORT / "diagrams" / "dashboard_scripted.png").read_bytes()
+    ctx["IMG_DASHBOARD"] = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
     return ctx, V
 
 
@@ -567,6 +862,32 @@ def to_pdf(html_path: Path, pdf_path: Path) -> None:
     assert pdf_path.exists() and pdf_path.stat().st_size > 10_000, "PDF was not produced"
 
 
+def verify_pdf(html: str, pdf: Path) -> dict:
+    """Checks on the produced file: it is a PDF, how many pages it has, nothing is embedded in it, and
+    the confidential assignment document is neither tracked, referenced nor named."""
+    data = pdf.read_bytes()
+    assert data.startswith(b"%PDF-"), "not a PDF"
+    counts = [int(c) for c in re.findall(rb"/Type\s*/Pages\b[^>]*?/Count\s+(\d+)", data)]
+    pages = max(counts) if counts else len(re.findall(rb"/Type\s*/Page\b", data))
+    assert pages >= 10, f"suspiciously short report: {pages} pages"
+    for marker in (b"/EmbeddedFile", b"/Filespec", b"/FileAttachment"):
+        assert marker not in data, f"the PDF embeds a file ({marker.decode()})"
+    assert "assignment" not in pdf.name.lower(), (
+        "the report file name must not mention the assignment"
+    )
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True
+    ).stdout.lower()
+    assert not [f for f in tracked.splitlines() if "assignment" in f and f.endswith(".pdf")], (
+        "the confidential assignment PDF is tracked by git"
+    )
+    low = html.lower()
+    for tag in ("<embed", "<object", "<iframe", "<link ", 'src="http', "src='http"):
+        assert tag not in low, f"the report HTML loads or embeds something external: {tag}"
+    assert "assignment.pdf" not in low and "assignment .pdf" not in low
+    return {"pages": pages, "bytes": len(data)}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-pdf", action="store_true")
@@ -580,6 +901,7 @@ def main() -> None:
         pdf = REPORT / PDF_NAME
         to_pdf(out, pdf)
         print("wrote", pdf, pdf.stat().st_size, "bytes")
+        print("verified:", verify_pdf(html, pdf))
 
 
 if __name__ == "__main__":

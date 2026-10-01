@@ -1,5 +1,9 @@
 # Real-video experiment (Gemini through the full pipeline)
 
+> **Status of this document.** It records the first real-video experiment (one Gemini recording of the clip, written up at M8b); sections 1 to 10 describe that run. Replaying the same cassette on the final code still gives 9 observations (8 replayed,
+> 1 carried forward), 33 objects (17 person, 16 vehicle), 25 events (13 person, 12 vehicle, 20 of them single-frame), 11 vehicle entities and 0 alerts (re-checked); the analyst answer excerpts in section 7 were not regenerated. The dashboard demo uses
+> a second recording of the same clip, described in section 11.
+
 This document records ONE experiment: a real video clip sent through
 `video -> sampling -> frame gate -> Gemini -> observation -> event -> entity -> rules -> analyst`,
 with real vision-model output. Every number below was measured on that single clip. Nothing here is a
@@ -19,14 +23,14 @@ experiment only closes the gap "scripted detections do not exercise a real visio
 ## 2. Input
 | Property | Value |
 |---|---|
-| File | `output/real/clip.mp4` (local, gitignored, never committed) |
+| File | the experiment used `output/real/clip.mp4` (local); the same bytes are now committed as `demo_assets/real_clip/clip.mp4` |
 | Size | 10,797,538 bytes |
 | Video | H.264 (High), MP4, 1920x1080, 25 fps constant, 617 frames, 24.68 s |
 | Audio | none |
 | Content | a high-angle view of a street intersection with traffic and pedestrians (a public scene, not fixed-property security footage) |
 | Identity used by the cassette | sha256 prefix `d7e3ceeba55902be` plus frame index |
 
-The provenance and licence of the clip are not recorded in the repository; state them wherever the clip is shown.
+The clip is licensed for redistribution and for hosting in this demo; replaying it needs neither an original video URL nor Gemini credentials.
 
 ## 3. Sampling and gating
 - Sampling: one frame every 3 s, giving 9 candidates at offsets 0, 3, ..., 24 s (frame indexes 0, 75, ..., 600); all decoded, none failed.
@@ -40,7 +44,7 @@ The provenance and licence of the clip are not recorded in the repository; state
 - Model `gemini-3.6-flash`; provider `--provider gemini --cassette-mode record`; structured output validated by the strict `ProviderOutput` contract.
 - **8 API calls, 0 retries, 76.1 s total API latency** (about 9.5 s per call), as printed in the record run's summary. Latency is not stored in the cassette or database, so these two figures
   cannot be re-derived from the saved artifacts.
-- The cassette holds 8 validated responses (`output/real/clip.gemini.cassette.json`, gitignored). It contains descriptions and objects only, no images, key or absolute paths.
+- The cassette holds 8 validated responses (`output/real/clip.gemini.cassette.json`, gitignored and not shipped: this is the first recording). It contains descriptions and objects only, no images, key or absolute paths.
 - Stored result: **9 observations** (8 Gemini, 1 carried) and **33 detected objects** (17 person, 16 vehicle). Three of the 33 belong to the carried observation, so the 8 Gemini responses
   contained 30 objects.
 - **Telemetry (SIMULATED):** 3 telemetry samples, not read from the video. Start time `2026-09-29T14:00:00+05:30` and zone `main_gate` were supplied on the command line and apply to the whole clip.
@@ -101,7 +105,7 @@ The vehicle search still only sees the first 20 entities the tool returns, and n
 - One clip, one model, one run: nothing here supports reliability or accuracy claims.
 
 ## 9. Reproducibility
-The video, cassette and databases live under `output/real/`, which is gitignored; they are not part of the repository, and no key or secret appears in this document.
+The first recording's cassette and the databases live under `output/real/`, which is gitignored and not part of the repository; the clip itself (the same bytes) and a second recording's cassette are committed under `demo_assets/real_clip/` (section 11). No key or secret appears in this document.
 
 Record (the only step that calls Gemini; needs `GEMINI_API_KEY` in the environment or `.env`):
 ```
@@ -131,3 +135,29 @@ Any change to the clip (trimming, re-encoding) invalidates the cassette, because
 - **What it does NOT establish:** real-world perception accuracy, security-detection performance, alert precision or recall, or that the event and entity model works on crowded scenes. The zero alerts and the
   25 events are outputs of these settings on this clip, not quality scores.
 - **Where the performance numbers come from:** the controlled `security_events` and labelled-scenario experiments (docs/evaluation.md) provide the rule-performance measurements, with their own stated limitations.
+
+## 11. The bundled recording used by the dashboard demo
+The repository bundles the clip and a **second** recording of it in `demo_assets/real_clip/`: `clip.mp4` (the bytes described in section 2), `clip.cassette.json` (8 recorded Gemini 3.6 Flash responses, for frames 0, 75, 150, 225, 300, 375, 450 and 600)
+and `manifest.json`, which pins both files by SHA-256 and holds the replay settings (simulated start 2026-09-29T14:00:00+05:30, zone `main_gate`, one sample every 3 s). The clip is licensed for redistribution and hosting in this demo, and the bundled replay needs
+neither an original video URL nor Gemini credentials. `python -m drone_agent.web --demo` builds this run first, with the same `ingest-video --provider cassette`, `build-events` and `analyze` commands as section 9; no model is called.
+
+Replay result on the final code (re-derived by replaying the bundled files):
+
+| | First recording (sections 1 to 10) | Bundled recording (this section) |
+|---|---|---|
+| Observations | 9 (8 replayed, 1 carried forward at frame 525) | 9 (8 replayed, 1 carried forward at frame 525) |
+| Objects | 33 (17 person, 16 vehicle) | 33 (17 person, 16 vehicle) |
+| Events | 25 (13 person, 12 vehicle; 20 single-frame) | 28 (15 person, 13 vehicle; 24 single-frame) |
+| Vehicle entities | 11 (1 with several appearances) | 12 (1 with several appearances) |
+| Alerts | 0 | 0 |
+
+The two recordings differ in the wording and attributes the model returned for the same frames, so the deterministic stages built different numbers of events and entities from them: the pipeline is the same and the input differs. This is the same fragmentation effect as in section 6, not a
+quality score for either recording.
+
+What this validates and what it does not is as in section 10: the replay shows the pipeline running end to end on real footage and reproducing exactly; there is no ground truth for the clip, so nothing here measures perception accuracy, detection performance or alert precision and recall, and the zero alerts says
+nothing about detection accuracy. Zone, time and telemetry are simulated. The recording statistics of the live runs are not stored in the repository and are not quoted here for the bundled recording.
+
+```
+python -m drone_agent ingest-video demo_assets/real_clip/clip.mp4 --db output/real_clip.db --provider cassette --cassette demo_assets/real_clip/clip.cassette.json --sample-every 3 --start 2026-09-29T14:00:00+05:30 --zone main_gate
+python -m drone_agent build-events --db output/real_clip.db && python -m drone_agent analyze --db output/real_clip.db
+```

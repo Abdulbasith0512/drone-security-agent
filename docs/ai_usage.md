@@ -3,7 +3,7 @@
 Honest record of where AI tools were used, what I changed or rejected, and how each result was
 validated. Updated at the end of every milestone.
 
-## Current status summary (M0-M8b)
+## Current status summary (M0 to the dashboard UI)
 **Author:** Abdul Basith Syed.
 
 **Development tool:** Claude Code (Claude Sonnet 5.5) generated the code, tests, evaluation harness and documentation from my milestone specifications.
@@ -24,6 +24,14 @@ was validated. My contribution was the requirements and scope cuts, the design d
 | M7 | `560c7c3` (tag `m7-final-baseline`) | evaluation, ablations and grounding analysis |
 | M8a | `0ae7414` | explicit truncation in the offline analyst |
 | M8b | `7589c2c` | real-video experiment documentation |
+| T01 | `0d277c1` | scripted scene signature keeps activities, object counts and descriptions |
+| T02 | `c7db491` | a loitering alert resolves only on observed departure (schema v6) |
+| T03, T04 | `cbd0fdb` | factual grounding of analyst answers; one tool-name contract |
+| T05 | `31888e0` | evaluation metrics separate subset, exhaustive and exact matching |
+| V01 to V03 | `b9ef929` | progressive video pipeline, bounded carry, failure handling, real-clip evidence |
+| Hosting | `be42f76` | opt-in public deployment mode |
+| Real demo | `cd878b0` | the bundled real video as the default dashboard run |
+| UI | `1dbbf05` | dashboard redesign |
 
 **How AI output was validated** (details in each entry): offline deterministic tests (the SDK boundary is mocked; no test needs a key), mutation checks that break the
 code to confirm the tests notice, real runs of Gemini only as separate, individually approved steps, and honest problem logs. **Decisions and corrections recorded below** include:
@@ -409,6 +417,37 @@ claim checker verdicts, generated observations, scale smoke run and exponent mat
 
 **What was considered and deliberately not changed:** treating a camera move as proof that a loiterer left (changing it alters the headline demo output and is not something the assignment asks for, so it is documented as a simplification); running real-video frames through the progressive engine (the assignment's simulated text-frame path already does this, so the real-video path is documented as batch); semantic validation of analyst claims, perception-hang recovery and incremental-runtime benchmarks (optional hardening, not assignment requirements).
 
+**Superseded:** the first three items above that were "considered and deliberately not changed" were done in the later phases below: observed departure (T02), the progressive real-video path (V01) and a factual check of analyst claims for the claim forms a program can verify (T03); perception-hang recovery was added for video by V02's call timeout. The F1 definition was refined again in T05.
+
 **Honest notes**
 - All model-related checks here are mocked or replayed; no live or paid model call was made, so nothing in this pass says anything about real model quality.
 - I can attest to this pass because I performed it; I cannot independently verify how the earlier milestones were produced beyond what their entries and commits record.
+
+## Later phases: remediation (T01 to T05), progressive video (V01 to V03), hosting, the real demo, the UI and the documentation
+**Tool:** Claude Code (Claude Sonnet 5.5), working from my phase-by-phase instructions, one phase at a time, each reported before the next and committed only after my approval. The rules I set for every phase: the assignment PDF is the source of truth, then the
+actual code, then any audit file; do not weaken tests or evaluation fixtures to make them pass; do not tune thresholds or fixtures to improve scores; do not manufacture real-model results; keep scripted or replayed behaviour separate from real Gemini evidence. The suite grew from 963 tests
+at the previous documentation refresh to 1301.
+
+**What the AI did, phase by phase, and what was corrected**
+- *T01, scene signature* (`runtime/scene.py`): the scripted scene signature now keeps activities, object counts and descriptions. The existing tests were kept; new ones fail on the old code.
+- *T02, observed departure* (`models/event.py`, `pipeline/aggregator.py`, `rules/loitering.py`, schema v6): a close reason now says only that observation coverage ended; `departure_observed_at` records that the zone was seen without the object, and a loitering alert resolves only then (or by an operator).
+  The first attempt changed the meaning of the existing departure handling and changed the demo output and the golden files; I had it reverted, and the approved version added the new column and updated the goldens deliberately, with each change explained. No threshold was changed. (`tests/test_departure.py`, 12 tests.)
+- *T03 and T04, grounding and the tool contract* (`agent/factcheck.py`, `agent/tools.py`, `agent/session.py`): model-written answers are checked for the claim forms a program can verify exactly, against the evidence cited in the same sentence; the citation validator was not weakened. Probing generated answers exposed false positives in the new check,
+  all fixed before the phase was accepted: query-window times, a clock time such as "12:03" read as the count 3, zone-scoped counts compared with store totals, observation counts on event lines, the closed-hours window and the UTC offset read as times, double counting of `[obs:]` and `[frame:]`, and ambiguous words such as "sat" and "no".
+  The run summary has one tool name (`summarize_run`, no alias), and a refusal after a failed tool call is not accepted as "no evidence". (`tests/test_factcheck.py`, `tests/test_tool_contract.py`.)
+- *T05, evaluation metrics* (`eval/`): F1 is 2TP / (2TP + FP + FN); matching is one-to-one and maximum-cardinality; a scenario is `label_satisfied` or `exact` (events and entities are subset labels unless declared exhaustive). Evaluation fixtures were not changed to improve any score. (`tests/test_eval_metrics.py`.)
+- *V01 to V03, video* (`runtime/consumer.py`, `runtime/video.py`, `video/ingest.py`, `eval/real_clip.py`): the video path now runs through the same downstream consumer as a patrol (`ingest-video --live`), carried observations are bounded, provider failures get explicit classified outcomes, and the real-clip evidence can be replayed without a key.
+  Corrections: the first timeout implementation made `video/` import the agent layer and failed the import-boundary test; the test was kept and the timeout is now injected from the runtime layer. The first replay summary showed every frame as failed because the replay lacked the placeholder confidence the CLI supplies for Gemini cassettes;
+  V02's explicit failure reporting exposed it and it was fixed. A tamper test changed nothing at first (wrong field path); it was corrected and the cassette confirmed byte-identical afterwards.
+- *Hosting* (`drone_agent/web/`): `--public-host` is opt-in and adds exactly one hostname and its https origin. A first version stripped whitespace and so accepted `"app.com\n"`; validation was made strict. Seven mutation checks (any host accepted, prefix match, any https origin, http origin, bind without a hostname, validation removed, host not passed on) each make a test fail;
+  one of them initially hung a test instead of failing it, so the test was changed to fail fast.
+- *Real demo* (`demo_assets/real_clip/`, `web/bundle.py`): the clip, its recorded cassette and a SHA-256 manifest ship with the repository; the run is built with the existing CLI commands and refuses a file that does not match the manifest. Nine mutation checks were run; eight make a test fail and one (dropping the size check) is equivalent because the SHA-256 check already covers it.
+- *Dashboard UI* (`frontend/`): a redesign on the same three files. Testing it in a real browser found problems that static tests could not: a header that took a large part of a tablet screen, an investigation panel that stayed a loading skeleton when its request failed, and a burst of frame requests (two picture sizes at once) that
+  would make the server decode every frame twice; each was fixed (one picture size, a short request queue, thumbnails loaded as they scroll into view). The plan for the redesign also noted that the old page had no guard against a slow answer overwriting a run the user had already left; the new page has one. A stall during verification was my own test harness not reading the server's output, not the product. After the redesign had been committed, an intermittent failure of the keyboard test for alert cards exposed a real accessibility bug: the alert list was rebuilt when a card's detail loaded and keyboard focus fell to the page body. The list now remembers which control of which alert (by the alert's id) has focus and restores it after every rebuild, and the test was changed so that it no longer re-focuses between keypresses (which had hidden the bug); removing the fix makes it fail. (`tests/test_web_ui.py`, `tests/test_web_ui_browser.py`, `tests/cdp_browser.py`.)
+- *Documentation* (this revision): the README and the documents under `docs/` were reconciled with the code, the tests and the harness. The evaluation snapshot was regenerated by running the harness; numbers that cannot be re-derived from the repository (recording statistics of the live runs) are not quoted.
+
+**Honest notes**
+- The only live model call in these phases was the recording of the bundled clip with Gemini 3.6 Flash during V03, a separately approved step; its statistics are in a local, gitignored log and are not quoted anywhere. Everything else was mocked, replayed or offline, so none of this says anything about real model quality.
+- The real clip has no ground truth. Its replay shows that the pipeline runs end to end on real footage and gives the same result every time; it does not measure perception accuracy or security performance.
+- The clip is licensed for redistribution and hosting in this demo; the bundled replay needs neither an original video URL nor Gemini credentials.
+- Mutation checks and the throwaway scripts used to probe the false positives are a development practice and are not part of the repository.

@@ -11,8 +11,9 @@ python -m drone_agent evaluate --output output/eval                    # functio
 python -m drone_agent evaluate --output output/eval --scale --scale-sizes 100,1000,10000,50000
 ```
 Outputs (gitignored): `results.json` (everything), `results.csv` (all experiment rows),
-`ablation_table.csv`, `summary.md`. The snapshot in the last section of this file was produced by
-the second command; timings will differ on another machine, everything else must not.
+`ablation_table.csv`, `summary.md`. The functional sections of the snapshot in the last part of this file were regenerated with the first command
+on the final code; the scale section was produced earlier by the second command and was not re-run for this revision. Timings will differ on another machine, everything else must not.
+`--noise` adds the perception-noise sweep (RQ10), which is not part of the snapshot, and `python -m drone_agent scale` runs the separate opt-in benchmark whose report is kept in `bench/`.
 
 ## Qualification that applies to everything below
 Controlled synthetic fixtures only. Rule precision/recall here measure agreement with labels written
@@ -28,8 +29,8 @@ or vision-model perception accuracy. The evaluation makes no live model or netwo
 | RQ4 | What entity memory adds | `pipeline_exp.run_entity_memory` | events with coarse linking vs `entities=[]` (harness only); seven vehicle-linking negative and positive controls |
 | RQ5 | Rule correctness without an LLM | `rules_exp` | 22 labelled scenarios x the 4 camera rules; count-based TP/FP/TN/FN; N/A for zero denominators (the 4 telemetry safety rules are scored by the ground-truth experiment, RQ8, and their own tests) |
 | RQ6 | Citation gate | `grounding_exp.run_adversarial` | 29 adversarial analyst outputs through the real `AnalystSession` (scripted LLM boundary) |
-| RQ7 | Semantic faithfulness | `grounding_exp.run_semantic_probe`, `claims` | answers with valid citations but unsupported claims; then an eval-only structured claim checker |
-| RQ8 | Streaming alerts against author-written ground truth | `ground_truth` | 10 scenario files with `expect:` blocks run headless through the streaming engine; alert precision, recall and F1 (2TP / (2TP + FP + FN), so TP = 0 with misses scores 0, not N/A), severity ladder, timing and detection latency |
+| RQ7 | Semantic faithfulness | `grounding_exp.run_semantic_probe`, `claims` | answers with valid citations but unsupported claims, through the citation check alone and through the production gate with its factual-claim check; the same comparison is also fed hand-written structured claims |
+| RQ8 | Streaming alerts against author-written ground truth | `ground_truth` | 10 scenario files with `expect:` blocks run headless through the streaming engine; alert precision, recall and F1 (2TP / (2TP + FP + FN), so TP = 0 with misses scores 0, not N/A), severity ladder, timing and detection latency, and whether each scenario is label-satisfied or exact |
 | RQ9 | Adaptive sampling versus a pixel gate | `sampler_exp` | generated streams with known meaningful changes; calls saved and changes missed, against a pixel gate and a fixed-refresh baseline |
 | RQ10 | Perception noise | `noise_exp` (`evaluate --noise`) | how precision, recall and latency degrade as scripted detections are dropped, mislabelled or delayed |
 | - | Scalability | `scale` | generated observations, per-stage median timings |
@@ -44,16 +45,19 @@ or vision-model perception accuracy. The evaluation makes no live model or netwo
   Precision = TP/(TP+FP), recall = TP/(TP+FN); a zero denominator is reported as N/A.
 - **Citation suite:** decision accuracy on this fixture set only (accept/reject compared with the label).
 - **Citation-valid / semantically-unsupported probe:** the share of authored answers, whose citations all exist, were retrieved and are well
-  formed but whose claims are false or overreaching, that the production gate still accepts. This is a characterisation of a failure boundary, not hallucination-detection accuracy.
-- **Claim-evidence checker (prototype, eval-only):** exact comparison of structured claims (event zone, type, activity, duration, start time,
-  alert severity and rule, entity appearance count) with stored evidence. It does not read prose and does not establish semantic entailment.
+  formed but whose claims are false or overreaching, that the gate still accepts, reported for the citation check alone and for the production gate (citation check plus factual-claim check). This is a characterisation of a failure boundary, not hallucination-detection accuracy.
+- **Factual-claim validation:** the production gate reads checkable claims (zones, types, activities, clock times, durations, counts, severities) out of an answer's prose and compares them with the evidence cited in the same sentence
+  (`agent/factcheck.py`). The probe also feeds the same comparison hand-written structured claims (event zone, type, activity, duration, start time, alert severity and rule, entity appearance count), which measures the comparison on its own.
+  Neither establishes semantic entailment.
+- **Ground-truth scenarios:** alert precision, recall and F1 = 2TP / (2TP + FP + FN) measure presence; matching is one-to-one and maximum-cardinality. Alerts are exhaustive labels. Events and entities are subset labels unless a scenario declares itself
+  exhaustive, so a scenario is `label_satisfied` when everything labelled happened and no alert is unexplained, and `exact` only when nothing at all beyond the labels was produced.
 
 ## Findings that matter (qualitative; numbers are in the generated tables)
 - **Gate:** it removes most calls on a mostly static sequence, but it is a pixel test. At the default threshold it misses meaningful changes that are small in
   pixels (the small and medium objects) while accepting illumination-only changes, and a missed change is silently absorbed. A low threshold just above the noise floor recovers
   them on this clean fixture at a small cost in calls; whether that holds on real footage is untested, and the default was intentionally not tuned to this fixture.
 - **Aggregation and flicker tolerance:** repeated detections become a handful of bounded events with every detection retained as evidence. One undetected frame splits a
-  continuous episode when tolerance is 0 and, because loitering is a duration test, removes the loitering alert; the tolerance is bounded (a longer gap still splits).
+  continuous episode when tolerance is 0 and, because loitering is a duration test, the two fragments each alert at the warning level instead of one escalated alert; the tolerance is bounded (a longer gap still splits).
 - **Entity memory:** the repeat-vehicle rule and "was it seen more than once" depend on it. The controls also show its limit: two genuinely different vehicles with the same coarse attributes are linked
   (a false link), which is why every wording says "similar" and never identity.
 - **Rules:** all labelled cells agree with the documented behaviour. That is a check of boundaries (inclusive threshold, closed-window edges, midnight crossing,
@@ -61,9 +65,11 @@ or vision-model perception accuracy. The evaluation makes no live model or netwo
 - **Citation gate:** it rejects nonexistent, unretrieved, missing and phrase-listed overclaims. The first run of this suite exposed two wrong decisions: an unknown citation type such as `[evt:...]` was silently ignored (a false accept)
   and a negation more than two words before "the same individual" was not recognised (a false reject). Both were fixed in the validator (unknown citation-shaped tokens now fail validation; negation is recognised within the same clause up to 8 words before
   the phrase, syntactically only) and the fixtures were left unchanged. Because the validator was corrected against these same cases, the accuracy in the tables below is no longer an independent measure; unit tests cover the fixed behaviours separately.
-- **Semantic faithfulness:** the gate cannot tell a true answer from a false one when the citations are valid: every authored unsupported answer passed, alongside the true controls. The narrow structured checker
-  catches the claim classes it covers (by construction) and nothing else; capability overclaims such as "tracking", identity wording outside the phrase list, intent inference and claims that the
+- **Semantic faithfulness:** the citation check alone cannot tell a true answer from a false one when the citations are valid: every authored unsupported answer passed it, alongside the true controls. The production gate also compares the facts an
+  answer states with the evidence it cites; it rejects the 13 of the 22 unsupported answers that state their claim in a form it reads (13 of 13) and still accepts the other 9. The expressible cases were authored to fit its claim classes, so
+  that catch rate is true by design and says nothing about generalisation, and it catches nothing outside those classes; capability overclaims such as "tracking", identity wording outside the phrase list, intent inference and claims that the
   analyst created an alert remain unchecked. General semantic entailment is not attempted and remains an open problem for this system.
+- **Ground truth:** all 10 scenario files satisfy their authored labels and 9 of 10 match them exactly (see the table below); the labels and the rules share an author, so this checks the implementation against the author's intent, not real-world performance.
 - **Scale:** event aggregation grows close to linearly, rule evaluation and the list queries a little above linear, and the SQLite keyword and filtered queries stay in milliseconds (exponents are in the scale table). Entity linking is clearly superlinear at the largest sizes; reading the code, the linker recomputes each candidate
   group's last-seen time (a maximum over the group's events) for every comparison, which would explain it. That is an observation, not a fix: M1-M6 behaviour was not changed to improve benchmark numbers.
 
@@ -77,7 +83,7 @@ or vision-model perception accuracy. The evaluation makes no live model or netwo
 7. The small live Gemini analyst sample (three approved runs of one question) cannot support any reliability claim; one run timed out and fell back, one wording flaw ("vehicle tracking") passed the gate.
 8. Timings come from one machine and one session, use in-process medians and single SQLite ingest runs, and exclude vision-model latency.
 9. The citation validator was corrected after this adversarial suite exposed two wrong decisions, so its accuracy on the suite is not independent evidence; the two fixes are narrow and syntactic and do not address semantic faithfulness.
-10. The eval-only claim checker is validated on claims written to fit its classes, so its perfect catch rate on them says nothing about generalisation.
+10. The factual-claim comparison is validated on claims written to fit its classes, so its perfect catch rate on them says nothing about generalisation.
 
 ## Results snapshot (generated; regenerate to refresh)
 
@@ -105,7 +111,8 @@ Generated by `python -m drone_agent evaluate` (harness v2).
 | Entity memory | repeat-vehicle alerts (security_events) | coarse linking on (default) | 1 | each vehicle event independent | 0 | -1 | linking is what lets the repeat rule and 'seen again' questions work; false links exist (1 in the controls) |
 | Entity memory | multi-appearance vehicle entities | coarse linking on (default) | 1 | each vehicle event independent | 0 | -1 | linking is what lets the repeat rule and 'seen again' questions work; false links exist (1 in the controls) |
 | Citation validation | invalid outputs accepted (of 19 adversarial) | citation gate on | 0 | no gate | 19 | -19 | gate decision accuracy on this fixture set: 1.0; misses: none |
-| Claim-consistency prototype (eval-only) | semantically unsupported answers accepted (of 22) | citation gate + structured claim checker | 9 | citation gate alone (production) | 22 | -13 | covers only structured claim classes; remaining passes: boundary_overclaim, capability_overclaim, identity_evasion, intent_evasion |
+| Factual-claim validation (production) | semantically unsupported answers accepted (of 22) | citation gate + facts read from the answer text (production) | 9 | citation gate alone (before factual validation) | 22 | -13 | checks structured facts only (zone, time, duration, severity, status, rule, activity, counts); true controls rejected: 0; remaining passes: boundary_overclaim, capability_overclaim, identity_evasion, intent_evasion |
+| Claim-consistency prototype (eval-only, hand-structured claims) | semantically unsupported answers accepted (of 22) | citation gate + structured claim checker | 9 | citation gate alone (before factual validation) | 22 | -13 | covers only structured claim classes; remaining passes: boundary_overclaim, capability_overclaim, identity_evasion, intent_evasion |
 
 ### Frame-gate threshold ablation
 
@@ -238,17 +245,17 @@ Generated by `python -m drone_agent evaluate` (harness v2).
 
 **Measured result**
 
-| rule | tp | fp | tn | fn | precision | recall |
-|---|---|---|---|---|---|---|
-| loitering | 4 | 0 | 18 | 0 | 1.0 | 1.0 |
-| after_hours_presence | 5 | 0 | 17 | 0 | 1.0 | 1.0 |
-| repeat_vehicle | 1 | 0 | 21 | 0 | 1.0 | 1.0 |
-| restricted_zone_entry | 3 | 0 | 19 | 0 | 1.0 | 1.0 |
+| rule | tp | fp | tn | fn | precision | recall | f1 |
+|---|---|---|---|---|---|---|---|
+| loitering | 4 | 0 | 18 | 0 | 1.0 | 1.0 | 1.0 |
+| after_hours_presence | 5 | 0 | 17 | 0 | 1.0 | 1.0 | 1.0 |
+| repeat_vehicle | 1 | 0 | 21 | 0 | 1.0 | 1.0 | 1.0 |
+| restricted_zone_entry | 3 | 0 | 19 | 0 | 1.0 | 1.0 | 1.0 |
 
 **Interpretation**
 
-- On the 22 labelled scenarios (88 scenario-rule cells) the rules matched the labels exactly in 22 scenarios; mismatching scenarios: none.
-- Per rule (TP/FP/TN/FN, precision, recall): loitering 4/0/18/0 P=1.000 R=1.000; after_hours_presence 5/0/17/0 P=1.000 R=1.000; repeat_vehicle 1/0/21/0 P=1.000 R=1.000; restricted_zone_entry 3/0/19/0 P=1.000 R=1.000. N/A means a zero denominator.
+- On the 22 labelled scenarios (88 scenario-rule cells) the alert COUNTS per rule matched the labels in 22 scenarios (every one of the 4 camera rules, with no alert from any other rule); mismatching scenarios: none. This is count agreement: it does not check which event raised an alert, its severity, timing or status.
+- Per rule (TP/FP/TN/FN, precision, recall, F1): loitering 4/0/18/0 P=1.000 R=1.000 F1=1.000; after_hours_presence 5/0/17/0 P=1.000 R=1.000 F1=1.000; repeat_vehicle 1/0/21/0 P=1.000 R=1.000 F1=1.000; restricted_zone_entry 3/0/19/0 P=1.000 R=1.000 F1=1.000. N/A means a zero denominator.
 - Rules are deterministic thresholds over events, so they need no LLM; agreement with the labels mainly confirms the implemented boundaries (inclusive 300 s, closed-window start inclusive and end exclusive, midnight crossing, missing-evidence non-link).
 - Controlled synthetic fixtures only: these results do not estimate real-world security precision, recall or perception accuracy.
 
@@ -317,40 +324,41 @@ Generated by `python -m drone_agent evaluate` (harness v2).
 
 **Measured result**
 
-| category | case | claims_supported_by_evidence | gate_accepts | structured_claims | checker_verdicts | gate_plus_checker_accepts |
-|---|---|---|---|---|---|---|
-| control_true | correct zone | True | True | 1 | supported | True |
-| control_true | correct duration | True | True | 1 | supported | True |
-| control_true | correct severity | True | True | 1 | supported | True |
-| control_true | correct appearance count | True | True | 1 | supported | True |
-| control_true | correct type and activity | True | True | 2 | supported,supported | True |
-| wrong_zone | vehicle event at the wrong zone | False | True | 1 | contradicted | False |
-| wrong_zone | person event in the restricted zone | False | True | 1 | contradicted | False |
-| wrong_duration | loitering stretched | False | True | 1 | contradicted | False |
-| wrong_duration | short vehicle event inflated | False | True | 1 | contradicted | False |
-| wrong_severity | repeat alert escalated | False | True | 1 | contradicted | False |
-| wrong_severity | analyst claims to upgrade | False | True | 1 | contradicted | False |
-| wrong_rule | alert attributed to another rule | False | True | 1 | contradicted | False |
-| wrong_count | overcounted appearances | False | True | 1 | contradicted | False |
-| wrong_count | undercounted appearances | False | True | 1 | contradicted | False |
-| wrong_type | person described as a vehicle | False | True | 1 | contradicted | False |
-| wrong_activity | person running | False | True | 1 | contradicted | False |
-| wrong_activity | vehicle driving | False | True | 1 | contradicted | False |
-| wrong_time | wrong start time | False | True | 1 | contradicted | False |
-| capability_overclaim | persistent tracking | False | True | 0 | none | True |
-| capability_overclaim | vehicle tracking wording | False | True | 0 | none | True |
-| identity_evasion | very same pickup | False | True | 0 | none | True |
-| identity_evasion | identical truck | False | True | 0 | none | True |
-| identity_evasion | that same guy | False | True | 0 | none | True |
-| identity_evasion | person from earlier | False | True | 0 | none | True |
-| intent_evasion | casing the property | False | True | 0 | none | True |
-| intent_evasion | planning a break-in | False | True | 0 | none | True |
-| boundary_overclaim | analyst claims it made the alert | False | True | 0 | none | True |
+| category | case | claims_supported_by_evidence | gate_accepts | structured_claims | checker_verdicts | gate_plus_checker_accepts | production_gate_accepts | production_gate_reason |
+|---|---|---|---|---|---|---|---|---|
+| control_true | correct zone | True | True | 1 | supported | True | True |  |
+| control_true | correct duration | True | True | 1 | supported | True | True |  |
+| control_true | correct severity | True | True | 1 | supported | True | True |  |
+| control_true | correct appearance count | True | True | 1 | supported | True | True |  |
+| control_true | correct type and activity | True | True | 2 | supported,supported | True | True |  |
+| wrong_zone | vehicle event at the wrong zone | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "main_gate" (zone) contradicts the cited evidence: the cited evidence is in zone ['parking_a |
+| wrong_zone | person event in the restricted zone | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "restricted_zone" (zone) contradicts the cited evidence: the cited evidence is in zone ['war |
+| wrong_duration | loitering stretched | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "1500s" (duration) contradicts the cited evidence: the cited evidence has duration(s) 480s |
+| wrong_duration | short vehicle event inflated | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "600s" (duration) contradicts the cited evidence: the cited evidence has duration(s) 60s |
+| wrong_severity | repeat alert escalated | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "critical" (severity) contradicts the cited evidence: the cited alert(s) have severity ['low |
+| wrong_severity | analyst claims to upgrade | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "high" (severity) contradicts the cited evidence: the cited alert(s) have severity ['critica |
+| wrong_rule | alert attributed to another rule | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "loitering, restricted_zone_entry" (rule) contradicts the cited evidence: the cited alert(s) |
+| wrong_count | overcounted appearances | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "5" (appearances) contradicts the cited evidence: appearance count [3] |
+| wrong_count | undercounted appearances | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "2" (appearances) contradicts the cited evidence: appearance count [3] |
+| wrong_type | person described as a vehicle | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "vehicle" (type) contradicts the cited evidence: the cited evidence concerns ['person'] |
+| wrong_activity | person running | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "running" (activity) contradicts the cited evidence: the cited evidence records activity ['p |
+| wrong_activity | vehicle driving | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "driving" (activity) contradicts the cited evidence: the cited evidence records activity ['p |
+| wrong_time | wrong start time | False | True | 1 | contradicted | False | False | attempt 1 rejected: statements contradicted by the stored evidence: "03:00" (time) contradicts the cited evidence: the cited evidence is timed 23:41, 23:49 |
+| capability_overclaim | persistent tracking | False | True | 0 | none | True | True |  |
+| capability_overclaim | vehicle tracking wording | False | True | 0 | none | True | True |  |
+| identity_evasion | very same pickup | False | True | 0 | none | True | True |  |
+| identity_evasion | identical truck | False | True | 0 | none | True | True |  |
+| identity_evasion | that same guy | False | True | 0 | none | True | True |  |
+| identity_evasion | person from earlier | False | True | 0 | none | True | True |  |
+| intent_evasion | casing the property | False | True | 0 | none | True | True |  |
+| intent_evasion | planning a break-in | False | True | 0 | none | True | True |  |
+| boundary_overclaim | analyst claims it made the alert | False | True | 0 | none | True | True |  |
 
 **Interpretation**
 
-- Citation-valid / semantically-unsupported probe: 22 of 22 answers whose citations all exist, were retrieved and are well formed, but whose claims are false or overreaching, were accepted by the gate (100.0%). All 5 of 5 true control answers were accepted too, so the gate cannot tell them apart.
+- Citation-valid / semantically-unsupported probe: 22 of 22 answers whose citations all exist, were retrieved and are well formed, but whose claims are false or overreaching, were accepted by the citation-only gate (100.0%). All 5 of 5 true control answers were accepted too, so the citation-only gate cannot tell them apart (this is the gate as it was before factual validation).
 - Structured claim checker (prototype): of the 13 unsupported cases expressible as structured claims it caught 13 (catch rate 1.000); unsupported answers still accepted by gate + checker: 9 of 22, all in claim classes the checker does not cover (['boundary_overclaim', 'capability_overclaim', 'identity_evasion', 'intent_evasion']). True controls rejected by the checker: 0.
+- Production gate (citation validation plus the factual claims it reads out of the answer text): 13 of 22 unsupported answers rejected (13 of 13 of the ones expressible as structured claims); still accepted: 9 (['boundary_overclaim', 'capability_overclaim', 'identity_evasion', 'intent_evasion']). True controls rejected: 0 of 5.
 - The expressible cases were authored to fit the checker's classes, so its catch rate is true by design, not evidence that it generalises. This is a measurement of the gate's failure boundary, not a hallucination detector: the checker verifies pre-structured claims and does not read prose.
 
 **Limitations**
@@ -368,22 +376,22 @@ Generated by `python -m drone_agent evaluate` (harness v2).
 
 **Measured result**
 
-| scenario | expected_alerts | tp | fp | fn | precision | recall | f1 | forbidden_hits | events | exact |
-|---|---|---|---|---|---|---|---|---|---|---|
-| benign_delivery | 0 | 0 | 0 | 0 | N/A | N/A | N/A | 0 | 3/3 | True |
-| flicker_noise | 1 | 1 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 1/1 | True |
-| geofence_violation | 1 | 1 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 0/0 | True |
-| intruder_garage | 2 | 2 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 2/2 | True |
-| loiter_midnight | 2 | 2 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 1/1 | True |
-| low_battery | 1 | 1 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 0/0 | True |
-| normal_day | 0 | 0 | 0 | 0 | N/A | N/A | N/A | 0 | 1/1 | True |
-| repeat_pickup | 1 | 1 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 4/4 | True |
-| security_events | 7 | 7 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 7/7 | True |
-| signal_loss | 3 | 3 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 0/0 | True |
+| scenario | expected_alerts | tp | fp | fn | precision | recall | f1 | forbidden_hits | events | events_extra | entities_extra | label_satisfied | exact |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| benign_delivery | 0 | 0 | 0 | 0 | N/A | N/A | N/A | 0 | 3/3 | 0 | 0 | True | True |
+| flicker_noise | 1 | 1 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 1/1 | 0 | 0 | True | True |
+| geofence_violation | 1 | 1 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 0/0 | 0 | 0 | True | True |
+| intruder_garage | 2 | 2 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 2/2 | 0 | 0 | True | True |
+| loiter_midnight | 2 | 2 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 1/1 | 0 | 0 | True | True |
+| low_battery | 1 | 1 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 0/0 | 0 | 0 | True | True |
+| normal_day | 0 | 0 | 0 | 0 | N/A | N/A | N/A | 0 | 1/1 | 4 | 2 | True | False |
+| repeat_pickup | 1 | 1 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 4/4 | 0 | 0 | True | True |
+| security_events | 7 | 7 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 7/7 | 0 | 0 | True | True |
+| signal_loss | 3 | 3 | 0 | 0 | 1.0 | 1.0 | 1.0 | 0 | 0/0 | 0 | 0 | True | True |
 
 **Interpretation**
 
-- 10 of 10 scenarios matched their ground truth exactly. Micro-averaged over 18 expected alerts: precision 1.000, recall 1.000, F1 1.000 (18 TP, 0 FP, 0 FN); forbidden alerts raised: 0.
+- 10 of 10 scenarios satisfied their ground-truth labels, and 9 of 10 matched them exactly (nothing produced beyond the labels; across all scenarios 4 event(s) and 2 entity(ies) were not labelled, and 0 scenario(s) declare their event and entity labels exhaustive). Alert presence, micro-averaged over 18 expected alerts: precision 1.000, recall 1.000, F1 1.000 (18 TP, 0 FP, 0 FN; F1 = 2TP / (2TP + FP + FN)); forbidden alerts raised: 0. 18 of 18 expected alerts were also fully correct (ladder, rung timing, detection deadline, final status).
 - Of the matched alerts, the severity ladder was right in 1.000 and every rung landed within the tolerance in 1.000; the final lifecycle status was right in 1.000.
 - Alert-detection latency (simulated seconds from the condition becoming true to the alert being raised): median 0.0 s, mean 1.1 s, p95 10.0 s, max 10.0 s over 18 alerts. It is bounded by frame spacing (60 s) for camera alerts and by the 10 s telemetry tick for safety alerts.
 - Events recalled 1.000, vehicle entities 1.000.

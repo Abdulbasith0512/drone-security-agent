@@ -592,19 +592,52 @@ def test_an_alert_card_expands_and_collapses_from_the_keyboard(page, site):
     alert = api(site, "/api/runs/security_events/alerts")["alerts"][0]
     open_run(page, site, "security_events")
     head = f"[data-alert={alert['alert_id']}] .alert-head"
+
+    def focused_head():
+        """True when the focused element is this alert's header, reached by keyboard (so its ring shows)."""
+        return page.js(
+            f"document.activeElement === document.querySelector({json.dumps(head)})"
+            " && document.activeElement.matches(':focus-visible')"
+        )
+
+    def settled(expanded: bool):
+        page.wait_js(
+            f"document.querySelector({json.dumps(head)}).getAttribute('aria-expanded') === '{str(expanded).lower()}'"
+        )
+        page.js("new Promise(r => setTimeout(r, 300))")  # let any asynchronous re-render finish
+
     assert dom(page, head, "el.getAttribute('aria-expanded')") == "false"
     page.js(f"document.querySelector({json.dumps(head)}).focus()")
     page.press("Enter")
+    settled(True)
+    # the detail arrives asynchronously and rebuilds the list: focus must survive that render
     page.wait_js(
-        f"document.querySelector({json.dumps(head)}).getAttribute('aria-expanded') === 'true'"
+        f"document.querySelector('#ad-{alert['alert_id']}') && document.querySelector('#ad-{alert['alert_id']}').innerText.toLowerCase().includes('why it was raised')"
     )
+    page.js("new Promise(r => setTimeout(r, 300))")
     assert dom(page, f"#ad-{alert['alert_id']}") is not None
-    page.js(f"document.querySelector({json.dumps(head)}).focus()")
+    assert focused_head(), "focus was lost when the alert detail loaded"
+    # collapse WITHOUT focusing again: the keypress must reach the same header
     page.press("Enter")
-    page.wait_js(
-        f"document.querySelector({json.dumps(head)}).getAttribute('aria-expanded') === 'false'"
-    )
+    settled(False)
     assert dom(page, f"#ad-{alert['alert_id']}") is None
+    assert focused_head(), "focus was lost when the alert collapsed"
+    page.press(" ")  # Space expands it again (the detail is cached now)
+    settled(True)
+    assert dom(page, f"#ad-{alert['alert_id']}") is not None
+    assert focused_head(), "focus was lost when the alert expanded with Space"
+    assert (
+        page.js("document.activeElement.closest('[data-alert]').dataset.alert") == alert["alert_id"]
+    )
+    # the "View evidence" button of the same card keeps focus through its own (asynchronous) re-render too
+    button = f"[data-alert={alert['alert_id']}] .alert-actions .btn"
+    page.js(f"document.querySelector({json.dumps(button)}).focus()")
+    page.press("Enter")
+    page.js("new Promise(r => setTimeout(r, 400))")
+    assert page.js(
+        f"document.activeElement === document.querySelector({json.dumps(button)})"
+        " && document.activeElement.matches(':focus-visible')"
+    ), "focus left the View evidence button after the evidence loaded"
 
 
 # ---- responsive: five viewports, two kinds of run ------------------------------------------------

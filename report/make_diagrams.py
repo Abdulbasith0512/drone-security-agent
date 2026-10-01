@@ -60,10 +60,11 @@ def edge(points, label=None, lx=None, ly=None, dashed=False, both=False):
     return out
 
 
-def group(x, y, w, h, title):
+def group(x, y, w, h, title, left=False):
+    tx, anchor = (x + 10, "start") if left else (x + w - 10, "end")
     return (
         f'<rect class="grp" x="{x}" y="{y}" width="{w}" height="{h}" rx="8"/>'
-        f'<text class="s" x="{x + w - 10}" y="{y + 15}" text-anchor="end">{escape(title)}</text>'
+        f'<text class="s" x="{tx}" y="{y + 15}" text-anchor="{anchor}">{escape(title)}</text>'
     )
 
 
@@ -76,7 +77,15 @@ def svg(width, height, body, title):
 
 def architecture() -> str:
     b = []
-    b.append(group(4, 4, 792, 250, "Inputs and perception"))
+    b.append(
+        group(
+            4,
+            4,
+            792,
+            250,
+            "Inputs and perception (the patrol engine and ingest-video --live process them frame by frame)",
+        )
+    )
     # scripted path
     b.append(box(16, 30, 128, 44, ["Scripted scenario", "(text frames, YAML)"], "in"))
     b.append(box(176, 30, 128, 44, ["ScriptedProvider"], "pr"))
@@ -110,7 +119,13 @@ def architecture() -> str:
     b.append(edge([(326, 202), (642, 202), (642, 160), (650, 160)]))
     # memory
     b.append(
-        group(4, 270, 792, 138, "Memory: SQLite + FTS5 (frame-by-frame index, then derived tables)")
+        group(
+            4,
+            270,
+            792,
+            138,
+            "Shared consumer (ObservationPipeline): SQLite + FTS5 index, then events, entities, rules, alerts",
+        )
     )
     b.append(box(16, 300, 130, 70, ["frames, telemetry,", "observations,", "objects + FTS5"], "st"))
     b.append(box(168, 306, 104, 58, ["Event", "aggregator"], "pr"))
@@ -131,13 +146,43 @@ def architecture() -> str:
     b.append(group(4, 424, 792, 132, "Analyst (read-only access to the stored evidence)"))
     b.append(box(16, 452, 176, 60, ["Bounded read-only tools", "(13, no SQL access)"], "an"))
     b.append(box(224, 452, 206, 60, ["Offline template analyst", "or LangChain + Gemini"], "an"))
-    b.append(box(462, 452, 120, 60, ["Citation gate"], "gt"))
-    b.append(box(614, 452, 176, 60, ["Cited answer", "or run summary"], "an"))
+    b.append(box(462, 452, 132, 60, ["Citation gate +", "factual-claim check"], "gt"))
+    b.append(box(626, 452, 164, 60, ["Cited answer", "or run summary"], "an"))
     b.append(edge([(192, 482), (224, 482)]))
     b.append(edge([(430, 482), (462, 482)]))
-    b.append(edge([(582, 482), (614, 482)]))
+    b.append(edge([(594, 482), (626, 482)]))
     b.append(edge([(104, 408), (104, 452)], "queries", 132, 434))
-    return svg(800, 566, "".join(b), "System architecture")
+    # dashboard
+    b.append(
+        group(
+            4,
+            570,
+            792,
+            96,
+            "Dashboard (read-only): opens each run's database read-only, no authentication",
+            left=True,
+        )
+    )
+    b.append(
+        box(
+            16, 596, 236, 56, ["Server (drone_agent/web)", "fixed routes, Host/Origin checks"], "pr"
+        )
+    )
+    b.append(box(280, 596, 220, 56, ["Frontend (frontend/)", "plain HTML, CSS and JS"], "in"))
+    b.append(
+        box(
+            528,
+            596,
+            262,
+            56,
+            ["Three runs: bundled real clip", "(recorded replay), scripted, synthetic"],
+            "st",
+        )
+    )
+    b.append(edge([(252, 624), (280, 624)]))
+    b.append(edge([(500, 624), (528, 624)]))
+    b.append(edge([(708, 512), (708, 596)], "answers", 738, 566))
+    return svg(800, 676, "".join(b), "System architecture")
 
 
 def analyst() -> str:
@@ -149,7 +194,7 @@ def analyst() -> str:
         box(392, 68, 150, 64, ["LangChain tool loop", "(at most 6 rounds,", "12 tool calls)"], "an")
     )
     b.append(box(392, 8, 150, 36, ["13 read-only tools"], "pr"))
-    b.append(diamond(612, 100, 112, 74, ["Citation gate"], "gt"))
+    b.append(diamond(612, 100, 112, 74, ["Citation gate", "+ fact check"], "gt"))
     b.append(box(690, 78, 100, 44, ["Answer shown"], "in"))
     b.append(box(268, 184, 170, 50, ["Deterministic template", "answer (labelled)"], "pr"))
     b.append(box(466, 168, 116, 44, ["One correction", "retry"], "an"))
@@ -213,7 +258,12 @@ def datamodel() -> str:
         250,
         210,
         "events",
-        ["type, zone, first/last seen", "attributes, activities", "close reason"],
+        [
+            "type, zone, first/last seen",
+            "attributes, activities",
+            "close reason",
+            "departure_observed_at (v6)",
+        ],
         "pr",
     )
     b.append(t)

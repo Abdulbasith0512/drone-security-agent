@@ -29,15 +29,18 @@ flowchart TD
     DB --> RE
     RE --> LC["Alert lifecycle: open, escalated, acknowledged, resolved"]
     LC --> AL[("alerts with evidence ids, severity ladder, recommended action")]
-    RT["Streaming patrol engine (run): tick by tick, alerts as they fire"] -.-> OB
-    RT -.-> RE
+    RT["Patrol engine (run): tick by tick"] --> PC
+    VL["Progressive video driver (ingest-video --live)"] --> PC
+    PC["ObservationPipeline: the one shared consumer (persist, events, entities, rules, alerts)"] -.-> AG
+    PC -.-> RE
     DB --> TO["Read-only bounded analyst tools"]
     EV --> TO
     EN --> TO
     AL --> TO
     TO --> AN["Analyst: offline template, or LangChain + Gemini (optional)"]
-    AN --> CG["Citation gate: ids exist and were retrieved, one retry, template fallback"]
+    AN --> CG["Citation gate + factual-claim check: ids exist and were retrieved, stated facts agree with the evidence, one retry, template fallback"]
     CG --> ANS["Cited answer / run summary"]
+    DB --> DASH["Read-only dashboard (drone_agent/web + frontend): three runs, offline analyst"]
     EV -.-> EVAL["Evaluation harness (drone_agent/eval, offline)"]
 ```
 
@@ -53,9 +56,11 @@ flowchart TD
 | Entity Memory | `EntityLinker` groups separate VEHICLE events whose normalised colour and body type are equal (or that share an explicit plate) into coarse "similar vehicle" entities. People are never linked, and a coarse link never claims physical identity | M3 |
 | Rule Engine | Eight deterministic rules with YAML thresholds. Camera rules run over events and entities: loitering (warning at 120 s, the same alert escalates to critical at 300 s at the main gate), after-hours presence, repeat vehicle, restricted-zone entry. Drone-safety rules run over telemetry: low battery, signal loss, altitude anomaly, geofence violation. Alert ids are deterministic and de-duplicated on (rule, subject or episode) | M4, M9b |
 | Alerts and lifecycle | Severity, reason, the numbers the rule compared, evidence (event ids, entity id, frame ids, telemetry samples), a severity ladder, a recommended action, and a status history open -> escalated -> acknowledged -> resolved. Only a rule (condition ended) or an operator changes status | M4, M9b |
-| Streaming runtime | `run` consumes telemetry and frames one tick at a time (`drone_agent/runtime/`): an adaptive sampler decides whether a frame needs a perception call, the perception agent (timeout, retry, fallback) produces the observation, the context engine updates events and entities, and rules run after every tick, so alerts are persisted and printed the moment they fire. Scripted scenarios only; a real video still goes through ingest-video, build-events and analyze | M10 |
-| Analyst Q&A / Summary | Read-only bounded tools over the store, an offline template analyst and an optional LangChain + Gemini tool loop. Answers cite stored ids; a citation gate checks that every id exists and was retrieved, allows one correction retry, then falls back to the template answer. Truncation is stated, never silent. LangChain is confined to `drone_agent/agent/llm.py` | M6, M8a |
+| Streaming runtime | `run` consumes telemetry and frames one tick at a time (`drone_agent/runtime/`): an adaptive sampler decides whether a frame needs a perception call, the perception agent (timeout, retry, fallback) produces the observation, the context engine updates events and entities, and rules run after every tick, so alerts are persisted and printed the moment they fire. Scripted scenarios only; a real video still goes through ingest-video, build-events and analyze Since V01 the same downstream consumer also serves the progressive video driver (next row). | M10 |
+| Shared consumer and progressive video | `ObservationPipeline` (`runtime/consumer.py`) is everything downstream of perception, one observation at a time: persist, advance events and entity links, evaluate the rules, then persist and announce every change. The scripted patrol engine and the progressive video driver (`run_video_live`, `ingest-video --live`) both feed this one object, so a video observation and a scripted one are indistinguishable once they reach it except for their own `source` and `provenance`. Ending the input closes open events as `scenario_end`, which says that observation coverage ended, not that anything left | V01 |
+| Analyst Q&A / Summary | Read-only bounded tools over the store, an offline template analyst and an optional LangChain + Gemini tool loop. Answers cite stored ids; a citation gate checks that every id exists and was retrieved, allows one correction retry, then falls back to the template answer. Truncation is stated, never silent. LangChain is confined to `drone_agent/agent/llm.py` Model-written answers are also fact-checked: the zones, types, activities, times, durations, counts and severities an answer states in checkable forms are compared with the evidence cited in the same sentence (`agent/factcheck.py`). | M6, M8a |
 | Evaluation harness | Offline, deterministic experiments (gate, compression, flicker, entity memory, rules, citation suite, semantic probe, scale) and their ablation table; no production code depends on it (only the `evaluate` CLI command loads it) | M7 |
+| Dashboard | A read-only evaluator UI: a standard-library server (`drone_agent/web/`) opens each run's SQLite database read-only and serves plain HTML/CSS/JS (`frontend/`). `--demo` builds three runs: the bundled real clip replayed from its recorded cassette, the scripted `security_events` scenario and a synthetic video. An opt-in public mode serves exactly one hostname; there is no authentication | Dashboard, Deploy, UI |
 
 ## Trust boundary
 Rules decide; the LLM explains and answers from tool output only.
@@ -68,6 +73,7 @@ drone_agent/
 frontend/  (evaluator dashboard UI)  backend/  (file-by-file guide to the code)
 config/events.yaml  config/security_rules.yaml            # event thresholds, rule thresholds
 scenarios/ (ten scripted scenarios with ground-truth labels)  tests/  docs/  bench/
+demo_assets/real_clip/                                     # the bundled real clip, its recorded cassette and a SHA-256 manifest (dashboard demo)
 output/                                                    # generated databases, cassettes, results (gitignored)
 ```
 Dependency direction: `agent` -> `store`; `rules` -> `models`; `eval` imports the production pipeline, rules and analyst gate but no pipeline, rules, store or analyst code imports `eval`; only the CLI's `evaluate` command loads it (lazily).
@@ -76,7 +82,7 @@ imports LangChain (`tests/test_scaffold.py` and `tests/test_agent_llm.py` enforc
 
 ---
 
-# Current state: what M9 to M13 added on top of the layers below
+# Current state: what M9 to M13 and the later phases added on top of the layers below
 
 The layer sections that follow keep the design rationale of the milestone that introduced each layer. They
 describe the original behaviour of that layer (for example "four rules", "schema version 2", "severity is fixed
@@ -88,12 +94,17 @@ per rule"). Where the current code differs, this section is authoritative.
 | Severity | Ladders: one alert rises through severities as the condition worsens (loitering: warning at 120 s, critical at 300 s; battery: 20% then 10%; geofence: high then critical). The alert id never changes | `rules/common.py`, `rules/lifecycle.py` |
 | Lifecycle | open -> escalated -> acknowledged -> resolved with a history table; state alerts (loitering, safety) resolve when the condition ends, incident alerts stay open until an operator acts; every alert stores a confidence, a verdict and a recommended action | `rules/lifecycle.py`, `store/derived.py` |
 | Zones | Six: main_gate, driveway, parking_area, warehouse, restricted_zone, garage | `models/base.py` |
-| Schema | Version 5 (additive migrations): v4 added streaming runs, observation provenance, open events, entity match scores, alert status/history/telemetry evidence, scenarios and agent_runs; v5 added indexes for bounded read paths at 10K+ rows | `store/schema.py` |
+| Schema | Version 6 (additive migrations): v4 added streaming runs, observation provenance, open events, entity match scores, alert status/history/telemetry evidence, scenarios and agent_runs; v5 added indexes for bounded read paths at 10K+ rows; v6 added `events.departure_observed_at` (see "Observed departure"). Older rows are not reinterpreted: re-run `build-events` to fill the new column | `store/schema.py` |
 | Streaming runtime | `run --scenario NAME` processes one tick at a time; perception tries its providers in order with a timeout per attempt; a frame that every provider fails on is dropped and counted (never invented) and telemetry safety checks carry on | `runtime/`, `agents/` |
 | Sampling | Adaptive: a frame is analysed on scene change, zone change, telemetry change, an open event that has not been looked at for 120 s, or after 300 s without a call; otherwise the last observation is carried forward and labelled as carried. For scripted frames the scene signal is a multiset of (class, activity, attributes), so an activity-only change or an extra identical-looking object is a change | `agents/sampling.py`, `runtime/scene.py` |
 | Analyst | Thirteen read-only tools (`query_events`, `search_events`, `search_frames`, `get_event`, `get_frame`, `get_alert`, `get_evidence`, `entity_history`, `list_entities`, `list_alerts`, `telemetry_at`, `get_timeline`, `summarize_run`) behind the same citation gate | `agent/tools.py` |
-| Scripted versus video | Scripted scenarios run progressively (`run`) or in batch (`ingest`, `build-events`, `analyze`) with the same final result. A real video only has the batch path today: frames are described first, events and alerts are derived afterwards | `runtime/`, `video/ingest.py` |
-| Alert resolution | A loitering alert resolves when the event closes because the object was no longer seen in the zone or the camera moved to another zone; a run that simply ends leaves it open. A camera move is treated as a departure, which is a simplification: the last frame of the zone still showed the person | `models/event.py`, `rules/loitering.py` |
+| Scripted versus video | Scripted scenarios run progressively (`run`) or in batch (`ingest`, `build-events`, `analyze`) with the same final result. A real video has both paths too: `ingest-video` describes the frames first and `build-events` and `analyze` derive events and alerts afterwards, or `ingest-video --live` processes it progressively, committing and announcing each frame's observation, events and alerts as it goes. The test suite compares the two video paths | `runtime/`, `video/ingest.py` |
+| Observed departure | An event's close reason says only why observation coverage ended (`gap`, `missed_frames`, `zone_change`, `scenario_end`), not that the object left. `Event.departure_observed_at` is set only when the drone kept looking at the same zone and the object was not there. A loitering alert resolves at that timestamp, or when an operator resolves it; a gap, a camera move to another zone or the end of the input leave it open | `models/event.py`, `pipeline/aggregator.py`, `rules/loitering.py` |
+| Video resilience | Gate-skipped frames carry the last observation forward but never longer than a bound (`--max-carry-seconds`, default the adaptive sampler's 300 s): after that the provider is asked again. With `--live`, a failed provider call (an error, malformed output, a replay miss, or a call that exceeds `--call-timeout`) gets an explicit failed outcome with a short classified reason; no observation is invented and the run goes on, or stops at the first failure with `--fail-fast`. The timeout is injected from the runtime layer, so `video/` never imports the agent layer | `video/ingest.py`, `runtime/video.py` |
+| Analyst grounding | Besides the citation gate, `agent/factcheck.py` reads checkable claims out of a model-written answer with fixed, conservative patterns and compares each with the evidence cited in the same sentence: supported, contradicted or unsupported (only the last two fail validation). It is not language understanding: a claim it does not recognise is neither passed nor failed. The model sees one tool name for the run summary (`summarize_run`, no alias), and a refusal that follows a failed tool call is not accepted as "no evidence" | `agent/factcheck.py`, `agent/tools.py`, `agent/session.py` |
+| Evaluation metrics | Ground-truth scoring separates `label_satisfied` (everything labelled happened and no alert is unexplained) from `exact` (nothing at all beyond the labels). Alerts are exhaustive labels; events and entities are subset labels unless a scenario declares itself exhaustive. F1 is 2TP / (2TP + FP + FN) and matching is one-to-one and maximum-cardinality | `eval/ground_truth.py`, `eval/base.py` |
+| Real-video demo | `demo_assets/real_clip/` holds the clip, its recorded cassette (Gemini 3.6 Flash) and a manifest that pins both by SHA-256; `--demo` replays it through the same `ingest-video`, `build-events` and `analyze` commands with no model call and no key. The clip is licensed for redistribution and hosting in this demo | `web/bundle.py` |
+| Dashboard and hosting | Read-only (databases are opened with SQLite `mode=ro`), a fixed static-file whitelist, Host and Origin checks, a strict Content-Security-Policy, loopback by default. Opt-in public mode: `--host 0.0.0.0` is accepted only with `--public-host HOSTNAME`, and the server then accepts exactly that hostname and its https origin. No authentication | `web/server.py`, `web/__main__.py`, `frontend/` |
 
 ---
 
@@ -231,6 +242,9 @@ sighting has duration 0), `attributes` (most common raw value per key; ties go t
 (the evidence; `evidence_count` = number of observations), `close_reason` and `entity_id` (vehicles only).
 Each detection belongs to exactly one event (tested: evidence rows equal detections). Observations that contain
 nothing are not evidence but still count as "missed frames" for events open in their zone.
+`close_reason` records why observation coverage of the event ended (`gap`, `missed_frames`, `zone_change`, `scenario_end`), not whether the
+object left. `departure_observed_at` (schema v6) is set only when the drone kept looking at the same zone and the object was not there; a gap, a
+zone change and the end of the input say nothing about it.
 
 ## Aggregation algorithm (`EventAggregator`, streaming: `process()` per observation, `flush()` at the end)
 For each observation in chronological order:
@@ -280,7 +294,7 @@ a VLM describing the same vehicle as "blue" then "black" produces two entities. 
 position (M1 assumption), so an event is "seen while the drone was in this zone", not a precise location.
 Thresholds are tuned by hand on two scripted scenarios; there is no evaluation on real footage yet.
 
-## Persistence (introduced in schema version 2; the current schema is version 5, see "Current state")
+## Persistence (introduced in schema version 2; the current schema is version 6, see "Current state")
 Added tables (`store/schema.py`): `events`, `event_observations` (evidence: event -> observation, chronological
 `position`; frames come through the observation), `entities`, `entity_events` (`event_id` UNIQUE: an event belongs to
 at most one entity). Foreign keys enforce `entity -> events -> observations -> frames`. Duration and evidence counts
@@ -385,7 +399,7 @@ Fixed per rule and set in the YAML: restricted-zone entry `high`, loitering `med
 repeat vehicle `low` (a coarse, similarity-based signal). There is no automatic escalation and no scoring; changing a
 severity is a config edit. No LLM is involved.
 
-## Persistence (introduced in schema version 3; the current schema is version 5, see "Current state")
+## Persistence (introduced in schema version 3; the current schema is version 6, see "Current state")
 Added tables: `alerts` (id, rule, severity CHECK-constrained to the four levels, title, message, `triggered_at`,
 `first_seen`, `last_seen` with UTC keys, zone, `entity_id` FK, `facts_json`) and `alert_events` (alert -> event FK). Only links are
 stored: an alert's frames are derived through `alert_events -> event_observations -> observations`, so the chain
@@ -417,17 +431,19 @@ earlier deterministic stages. **Why LangChain is confined to `agent/llm.py`:** i
 
 | Module | Role |
 |---|---|
-| `tools.py` | The ten read-only tools (below). Bounded JSON views; invalid arguments return `{"error": ...}` |
+| `tools.py` | The thirteen read-only tools offered to a model (below), plus a few older methods the template analyst calls directly. Bounded JSON views; invalid arguments return `{"error": ...}` |
 | `evidence.py` | View builders and `ToolLimits`; every view lists the citation refs it contains |
 | `citations.py` | Citation parsing and the validator |
+| `factcheck.py` | Deterministic factual-claim validation: reads checkable claims out of an answer and compares them with the evidence cited in the same sentence |
 | `summary.py` | `run_facts` (structured facts + limitations) and the deterministic `render_summary` |
 | `offline.py` | Deterministic template analyst (no key, no network) |
 | `session.py` | `AnalystSession`: bounded memory, LLM call, citation gate, one retry, fallback |
 | `llm.py` | The only LangChain code: Gemini chat model + a bounded tool-calling loop |
 | `prompt.py`, `config.py`, `build.py` | System prompt, analyst model config (`ANALYST_MODEL`), lazy construction |
 
-**Tools** (no arbitrary SQL, no generic execution): `search_observations(query, zone, object_type, start, end, limit)`, `list_events`, `get_event`,
-`get_event_evidence`, `list_entities`, `get_entity`, `get_entity_history`, `list_alerts(rule_id, severity, zone, limit)`, `get_alert`, `get_run_summary`.
+**Tools** (no arbitrary SQL, no generic execution): the thirteen offered to a model are `query_events`, `search_events`, `search_frames`, `get_event`, `get_frame`,
+`get_alert`, `get_evidence`, `entity_history`, `list_entities`, `list_alerts`, `telemetry_at`, `get_timeline` and `summarize_run` (one name for the run summary, no alias).
+A few older methods (`list_events`, `get_entity`, ...) remain because the deterministic template analyst calls them directly; they are not offered to a model.
 **Limits** (`ToolLimits`): observations default 8 / max 15; events, alerts, entities 20; evidence observations per event 15; frame ids listed per event or alert 10;
 descriptions cut to 200 characters (ending in `...`). Results that were cut carry `total`, `returned` and `truncated`; a tool result over 12,000 characters is refused.
 The LLM tool loop is bounded too (6 model rounds, 12 tool calls per answer).
@@ -437,7 +453,7 @@ The LLM tool loop is bounded too (6 model rounds, 12 tool calls per answer).
 never-retrieved id is rejected); (3) an answer that states facts must cite something, unless it says "Insufficient evidence"; (4) malformed tokens such as
 `[event EVT-1]` and tokens of an UNKNOWN type such as `[evt:EVT-1]` or `[source:x]` are rejected (unknown citation syntax is never ignored; ordinary brackets like `[12:30]` are not affected); (5) identity/intent wording ("the same person", "burglar", "criminal",
 "confirmed to be the same vehicle") is rejected unless a negation cue ("not", "no", "cannot", "never", "without", "n't") stands in the same clause within 8 words before it ("It cannot be said that this is the same individual" passes;
-"There is no doubt this is the same person" and "not different, this is the same person" do not). Negation is recognised syntactically only; double negatives are not understood.
+"There is no doubt this is the same person" and "not different, this is the same person" do not). Negation is recognised syntactically only; double negatives are not understood. (6) The factual claims an answer states in checkable forms (alert severity, status and rule; zones; person/vehicle types; activities; clock times; durations; appearance counts; totals of alerts, events, observations and entities; object counts in a cited frame) are compared with the evidence cited in the same sentence (`agent/factcheck.py`); a contradicted claim, or one whose cited evidence carries no such fact, fails validation. This is not entailment: a claim phrased in a form the patterns do not recognise is not seen, and a refusal that follows a failed tool call is not accepted as "no evidence".
 If validation fails the model gets ONE correction turn naming the problems; if the second answer also fails, the deterministic template answer is returned instead
 (mode `fallback`, with the reasons in `notes`). An unavailable model (auth, quota, network) degrades to the same fallback. Only validated or template text is ever shown.
 
@@ -453,14 +469,14 @@ analyst a follow-up such as "Where was it seen?" resolves only when the previous
 "telemetry is simulated" and "N observations are carried forward"). `summarize` prints the deterministic rendering; with `--provider gemini` the model rewrites those same facts as prose
 under the same citation gate. A follow-up ("What objects were observed?") is answered from stored observations/events, never by reprocessing the video.
 
-**Known limitations.** The citation gate proves ids exist and were retrieved, NOT that the sentence around a citation is true: a model can cite a real id for a wrong claim. A live answer used the phrase "vehicle tracking" (the system does coarse attribute grouping, not tracking) and passed the gate; semantic entailment between claims and cited evidence is not verified and is an M7 evaluation target. The
+**Known limitations.** The citation gate proves ids exist and were retrieved, NOT that the sentence around a citation is true: a model can cite a real id for a wrong claim. The factual-claim check closes that gap only for the claim forms it can read out of the text (listed above); in the evaluation probe 9 of 22 unsupported answers still pass. A live answer used the phrase "vehicle tracking" (the system does coarse attribute grouping, not tracking) and passed the gate; semantic entailment between claims and cited evidence is not verified and is an M7 evaluation target. The
 overclaim check is a narrow phrase list, not semantic. The template analyst is brittle outside its patterns. The analyst model can be wrong, slow or rate-limited; the fallback
 covers outages, not subtle misstatements. Evidence quality is bounded by the vision model (M5B) and by simulated telemetry.
 
 ## Evaluation harness (M7, `drone_agent/eval/`)
 An evaluation-only package: it imports the production pipeline, rules and analyst gate but no pipeline, rules, store or analyst code imports it (only the CLI's `evaluate` command loads it, lazily), and it makes no network or API call. `runner.run_all` executes the experiments
-(`gate_exp`, `pipeline_exp` for compression/flicker/entity memory, `rules_exp`, `grounding_exp` for the citation suite and the semantic-faithfulness probe, optional `scale`), derives the ablation table from
-their results, and writes `results.json`, `results.csv`, `ablation_table.csv` and `summary.md`. `claims.py` is a prototype structured claim-evidence checker that lives ONLY in the evaluation layer. Ablations are done
+(`gate_exp`, `pipeline_exp` for compression/flicker/entity memory, `rules_exp`, `grounding_exp` for the citation suite and the semantic-faithfulness probe, `ground_truth` for the scenarios' `expect:` blocks, `sampler_exp` for adaptive sampling, optional `scale` and `noise_exp`), derives the ablation table from
+their results, and writes `results.json`, `results.csv`, `ablation_table.csv` and `summary.md`. `claims.py` feeds hand-written structured claims to the comparison logic that now lives in the production analyst (`agent/factcheck.py`), to measure that comparison on its own. Ablations are done
 inside the harness (`entities=[]`, a different `max_missed_frames`, gate threshold 0) so production behaviour is untouched. See docs/evaluation.md for definitions, results and threats to validity.
 
 ## Known false positives and false negatives
@@ -472,7 +488,7 @@ False negatives: a person who moves between zones, or is missed for longer than 
 events that may each stay below the loitering threshold; a single sighting has duration 0; vehicles at night do not raise
 an after-hours alert by default (add `vehicle` to `object_types`, at the cost of noise); a vehicle whose colour the VLM
 reports inconsistently splits into two entities and may miss the repeat threshold; nothing is seen while the drone is
-elsewhere. Thresholds are hand-set on two scripted scenarios (the 21 labelled synthetic scenarios added in M7 check them, but are also synthetic) and are not validated on real security footage.
+elsewhere. Thresholds are hand-set on two scripted scenarios (the 22 labelled synthetic scenarios of the evaluation harness check them, but are also synthetic) and are not validated on real security footage.
 
 ---
 
@@ -500,11 +516,19 @@ SIMULATED timeline (start time + patrol zones) ─► simulated telemetry ─►
 | Output of the front end | `Observation`, `Telemetry` | the same `Observation`, `Telemetry` |
 | Everything downstream | identical: `Store`, `build-events`, `analyze` never learn which one produced the data |
 
+## Progressive processing (`ingest-video --live`, `runtime/video.py`)
+`run_video_live` walks the lazy `VideoStream` and hands every step to the same `ObservationPipeline` the scripted patrol engine uses: each frame's observation, the event it extends and any alert it raises are
+committed and announced before the next frame is decoded, so they are in the store while the video is still being processed. The simulated telemetry of the timeline is fed in time order next to the frames. The batch
+path (`ingest-video`, then `build-events` and `analyze`) is unchanged and reaches the same final events, entities and alerts. Gate-skipped frames carry the last observation forward but only up to
+`--max-carry-seconds` (default 300 s, the adaptive sampler's bound), after which the provider is asked again. A provider failure gets an explicit failed outcome with a classified reason (`malformed_output`, `replay_miss`,
+`timeout`, `provider_error`) and the run goes on; `--fail-fast` stops at the first one, and `--call-timeout` treats a call that takes too long as a failed frame. This concerns WHEN things are computed, not how good a
+description is.
+
 ## What is real and what is simulated
 **Real:** the video file, its decoding, the sampled frames and their pixels, the frame-change gate scores, the frame
 identity hashes, and the vision model's descriptions when `--provider gemini` is used. **Simulated:** the drone telemetry (a demo video
 carries none), the zone each frame is assigned to, and the wall-clock time of each frame. **Canned:** the demo cassette
-generated by `make-demo-video` (never committed) holds descriptions written by that tool, not by a vision model; the
+generated by `make-demo-video` (not committed) holds descriptions written by that tool, not by a vision model; the
 cassette says so in its `provider` field and the CLI prints it.
 
 ## Video source (`video/source.py`)
@@ -608,17 +632,25 @@ observation, exactly as for scripted data. The timeline must cover the video (el
 ## Synthetic test video (`video/synthetic.py`)
 A deterministic 20 s, 10 fps, 320x180 video of four obvious scenes (empty yard, a person static for 8 s, a blue vehicle, empty
 yard), written as MJPG `.avi` (each frame is its own JPEG, so identical frames decode identically). It is generated inside the
-tests (session fixture) or by `make-demo-video` into the gitignored `output/`; no video is committed. With `--sample-every 2` it
+tests (session fixture) or by `make-demo-video` into the gitignored `output/`; this synthetic video is not committed (the only committed video is the bundled real clip, below). With `--sample-every 2` it
 gives 10 samples of which the gate accepts 4 (frames 0, 40, 120, 160) and skips 6.
+
+## Bundled real clip and its recorded cassette (`demo_assets/real_clip/`)
+The dashboard's default run uses a real video that is part of the repository, licensed for redistribution and for hosting in this demo. `clip.mp4` is 1920x1080, 25 fps, 617 frames, 24.68 s and 10,797,538 bytes;
+`clip.cassette.json` holds the recorded answers of a Gemini 3.6 Flash run for 8 of its frames; `manifest.json` pins both files by SHA-256 and holds the replay settings (simulated start 2026-09-29T14:00:00+05:30, zone
+`main_gate`, one sample every 3 s). `web/bundle.py` checks both files against the manifest before building the run and refuses to build from a file that differs. The run is built by the existing
+`ingest-video --provider cassette`, `build-events` and `analyze` commands: no model is called and no API key is read, and the bundled replay needs no original video URL. Replaying it gives 9 observations (8 replayed, 1 carried
+forward), 33 objects, 28 events, 12 entities and 0 alerts. The frames are the clip's real pixels; the descriptions are recorded model output; zone, time and telemetry are simulated; and there is no ground truth, so
+the result is an integration replay, not a measurement of perception accuracy or detection performance.
 
 ## CLI
 `ingest-video VIDEO --db DB [--provider cassette|gemini] [--cassette FILE] [--cassette-mode replay|record|live] [--model M]
 [--sample-every S] [--no-gate] [--gate-threshold T] [--gate-resize WxH] [--skipped carry|drop] [--start ISO --zone Z | --timeline YAML]
-[--max-dimension N] [--jpeg-quality Q] [--default-confidence C] [--verbose]`, `describe-frame VIDEO --time S` (one Gemini call, stores nothing) and
+[--max-dimension N] [--jpeg-quality Q] [--default-confidence C] [--live] [--max-carry-seconds S] [--call-timeout S] [--fail-fast] [--verbose]`, `describe-frame VIDEO --time S` (one Gemini call, stores nothing) and
 `make-demo-video [--out-dir DIR]`. The summary reports video duration, original frames, sample candidates (decoded / failed / beyond
 end), gate accepted and skipped, provider calls and cassette replays, observations and objects written, simulated telemetry samples and
-stale associations. It does NOT build events or alerts; run `build-events` and `analyze` next. The whole pipeline runs before the
-database is opened, so any error (bad video, cassette miss, malformed response, short timeline) leaves no database behind.
+stale associations. Without `--live` it does NOT build events or alerts; run `build-events` and `analyze` next (with `--live` they are built as the video is processed). In batch mode the whole pipeline runs before the
+database is opened, so any error (bad video, cassette miss, malformed response, short timeline) leaves no database behind; with `--live` each frame is committed as it goes, so what was already committed stays.
 
 ## Gemini provider (M5B, `vision/gemini.py`)
 Gemini is an OPTIONAL real `FrameDescriber` (official `google-genai` SDK). Nothing else changes: it returns the same validated

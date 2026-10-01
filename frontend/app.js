@@ -774,7 +774,28 @@ function renderEntities() {
 }
 
 /* ---------- alert center ---------- */
+/* The alert list is rebuilt whenever a card is expanded, collapsed or selected, and again when its detail arrives.
+   Rebuilding replaces the focused button, so remember which control of which alert (by the alert's own id, not by
+   position) has keyboard focus and give it back after every rebuild; otherwise focus falls to the page body. */
+function alertFocus() {
+  const el = document.activeElement, body = $("#alerts-body");
+  const card = el && el.closest ? el.closest("[data-alert]") : null;
+  if (!card || !body.contains(card)) return null;
+  return { id: card.dataset.alert, onView: !!el.closest(".alert-actions") && el.matches(".btn") };
+}
+function restoreAlertFocus(saved) {
+  if (!saved) return;
+  const card = [...document.querySelectorAll("#alerts-body [data-alert]")].find((c) => c.dataset.alert === saved.id);
+  if (!card) return;
+  const target = (saved.onView && card.querySelector(".alert-actions .btn")) || card.querySelector(".alert-head");
+  if (target) target.focus({ preventScroll: true });
+}
 function renderAlerts() {
+  const saved = alertFocus();
+  drawAlerts();
+  restoreAlertFocus(saved);
+}
+function drawAlerts() {
   const body = $("#alerts-body");
   if (state.errors.alerts) { panelError(body, "alerts"); return; }
   const list = state.idx.alerts;

@@ -3,57 +3,96 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>Drone Security Analyst Dashboard</title>
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+<a class="skip" href="#panel-video">Skip to the video</a>
+
 <header class="top">
   <div class="brand">
-    <h1>Drone Security Analyst</h1>
-    <span class="sub">Evaluator dashboard &middot; offline &middot; read-only &middot; no model calls</span>
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"></path>
+      <circle cx="12" cy="11" r="2.6"></circle>
+      <path d="M12 6.5v1.9M12 13.6v1.9M7.5 11h1.9M14.6 11h1.9"></path>
+    </svg>
+    <div>
+      <h1>Drone Security Analyst</h1>
+      <p class="sub">AI-powered drone security monitoring &amp; investigation</p>
+    </div>
   </div>
-  <label class="run-select">Run
+  <ul id="status-chips" class="chips" aria-label="System status"></ul>
+  <div class="run-picker">
+    <label for="run-select">Run</label>
     <select id="run-select" aria-label="Choose a run"></select>
-  </label>
+  </div>
 </header>
 
 <div id="error" class="error" role="alert" hidden></div>
 <div id="kind-banner" class="banner" role="note"></div>
 
-<nav id="pipeline" class="pipeline" aria-label="Pipeline: from video to analyst"></nav>
-
 <main>
-  <section id="panel-overview" class="panel" aria-labelledby="h-overview">
-    <h2 id="h-overview">Security overview</h2>
-    <div id="overview-body" class="loading">Loading&hellip;</div>
-  </section>
+  <div class="stage-grid">
+    <section id="panel-video" class="panel video-panel" aria-labelledby="h-video">
+      <h2 id="h-video">Video investigation</h2>
+      <div id="video-body" class="loading" aria-busy="true">Loading&hellip;</div>
+      <div id="kpi-strip" class="kpis" aria-label="Run totals"></div>
+      <div class="strip-head">
+        <h3 id="h-strip">Observations</h3>
+        <span id="strip-note" class="muted small"></span>
+      </div>
+      <div id="strip" class="strip" role="group" aria-labelledby="h-strip"></div>
+    </section>
+
+    <aside id="panel-investigation" class="panel investigation" aria-labelledby="h-investigation">
+      <h2 id="h-investigation">Investigation</h2>
+      <div id="investigation-body" class="loading" aria-live="polite">Loading&hellip;</div>
+    </aside>
+  </div>
 
   <section id="panel-timeline" class="panel" aria-labelledby="h-timeline">
-    <h2 id="h-timeline">Event timeline</h2>
-    <p class="hint">Events are repeated detections merged in time. Select an event to see the observations behind it.</p>
+    <div class="panel-head">
+      <h2 id="h-timeline">Event timeline</h2>
+      <p class="hint">Repeated detections merged in time. Select an event to see the evidence behind it and jump to its frame.</p>
+    </div>
     <div id="timeline-body" class="loading">Loading&hellip;</div>
   </section>
 
-  <section id="panel-alerts" class="panel" aria-labelledby="h-alerts">
-    <h2 id="h-alerts">Alert investigation</h2>
-    <p class="hint">Alerts come from deterministic rules over events. Nothing on this page, and no model, decides whether an alert exists.</p>
-    <div id="alerts-body" class="loading">Loading&hellip;</div>
-  </section>
+  <div class="two-col">
+    <section id="panel-alerts" class="panel" aria-labelledby="h-alerts">
+      <div class="panel-head">
+        <h2 id="h-alerts">Alert center</h2>
+        <p class="hint">Alerts come from deterministic rules over events. Nothing on this page, and no model, decides whether an alert exists.</p>
+      </div>
+      <div id="alerts-body" class="loading">Loading&hellip;</div>
+    </section>
+
+    <section id="panel-overview" class="panel" aria-labelledby="h-overview">
+      <div class="panel-head">
+        <h2 id="h-overview">Entity memory</h2>
+        <p class="hint">Vehicles grouped by similar appearance. A match is never a confirmed identity.</p>
+      </div>
+      <div id="overview-body" class="loading">Loading&hellip;</div>
+    </section>
+  </div>
 
   <section id="panel-analyst" class="panel" aria-labelledby="h-analyst">
-    <h2 id="h-analyst">AI Security Analyst</h2>
     <div id="analyst-body" class="loading">Loading&hellip;</div>
   </section>
 
-  <section id="panel-video" class="panel" aria-labelledby="h-video">
-    <h2 id="h-video">Video / Observations</h2>
-    <div id="video-body" class="loading">Loading&hellip;</div>
+  <section id="pipeline-section" class="panel" aria-labelledby="h-pipeline">
+    <div class="panel-head">
+      <h2 id="h-pipeline">System pipeline</h2>
+      <p class="hint">Each stage only reads the previous one. Select a stage to jump to its panel.</p>
+    </div>
+    <nav id="pipeline" class="pipeline" aria-label="Pipeline: from video to analyst"></nav>
   </section>
 </main>
 
 <footer>
-  <span>Served from localhost only. Every number here is read from the run's SQLite database by the existing backend; this page contains no detection logic.</span>
+  <span>Read-only demo data. Every number on this page is read from the run's database through the dashboard's API; this page contains no detection logic.</span>
 </footer>
 <script src="/static/app.js" defer></script>
 </body>

@@ -250,7 +250,10 @@ result was validated (M0 to M13 and the first audit). The later phases (audit re
 done the same way and are visible as separate commits in the git history.
 
 ## Demo videos
-Demo video links will be added before submission.
+Recorded demonstrations of the project (Loom):
+
+- Video 1: <https://www.loom.com/share/2704174f6873443f823269243ff1d6e7>
+- Video 2: <https://www.loom.com/share/9b70bfe362b04223aabdda13b25aa387>
 
 ## Repository safety
 - The confidential assignment PDF, `.env`, databases, generated outputs (`output/`), caches and all other videos are gitignored; `.env.example` holds placeholders only. No key is stored in the repository.

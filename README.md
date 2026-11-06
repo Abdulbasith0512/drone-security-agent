@@ -3,6 +3,13 @@
 Prototype for the FlytBase AI Engineer assignment, by Abdul Basith Syed: a docked-drone security analyst that turns video and simulated telemetry into
 events, deterministic alerts, searchable history and evidence-cited answers.
 
+## Demo videos
+Recorded demonstrations of the project (Loom):
+
+- Video 1: <https://www.loom.com/share/2704174f6873443f823269243ff1d6e7>
+- Video 2: <https://www.loom.com/share/9b70bfe362b04223aabdda13b25aa387>
+
+
 Design in one line: `FRAME -> OBSERVATION -> EVENT -> MEMORY -> REASONING`. **Rules decide; the LLM only explains.**
 
 ## Contents
@@ -249,11 +256,6 @@ corrections. Gemini is a runtime component, not a development assistant. [docs/a
 result was validated (M0 to M13 and the first audit). The later phases (audit remediation, the progressive video pipeline, the opt-in hosting mode, the bundled real-video demo and the dashboard redesign) were
 done the same way and are visible as separate commits in the git history.
 
-## Demo videos
-Recorded demonstrations of the project (Loom):
-
-- Video 1: <https://www.loom.com/share/2704174f6873443f823269243ff1d6e7>
-- Video 2: <https://www.loom.com/share/9b70bfe362b04223aabdda13b25aa387>
 
 ## Repository safety
 - The confidential assignment PDF, `.env`, databases, generated outputs (`output/`), caches and all other videos are gitignored; `.env.example` holds placeholders only. No key is stored in the repository.
